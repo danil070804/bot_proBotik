@@ -54,6 +54,12 @@ def init_db():
                 'user_id BIGINT, text TEXT, created_at TIMESTAMP DEFAULT NOW(), '
                 'UNIQUE(target, message_id, username))'
             )
+            cursor.execute(
+                'CREATE TABLE IF NOT EXISTS invited_users('
+                'source_target TEXT NOT NULL, invite_target TEXT NOT NULL, username TEXT NOT NULL, '
+                'user_id BIGINT, status TEXT NOT NULL, error TEXT, created_at TIMESTAMP DEFAULT NOW(), '
+                'UNIQUE(invite_target, username))'
+            )
         else:
             cursor.execute('CREATE TABLE IF NOT EXISTS chats(acc TEXT, chat TEXT UNIQUE)')
             cursor.execute(
@@ -78,6 +84,12 @@ def init_db():
                 'CREATE TABLE IF NOT EXISTS parsed_comments('
                 'target TEXT, message_id INTEGER, username TEXT, user_id INTEGER, text TEXT, '
                 'created_at TEXT DEFAULT CURRENT_TIMESTAMP, UNIQUE(target, message_id, username))'
+            )
+            cursor.execute(
+                'CREATE TABLE IF NOT EXISTS invited_users('
+                'source_target TEXT, invite_target TEXT, username TEXT, user_id INTEGER, '
+                'status TEXT, error TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP, '
+                'UNIQUE(invite_target, username))'
             )
         conn.commit()
         cursor.close()
@@ -119,6 +131,9 @@ def is_full(acc):
 
 
 def save_parsed_user(target, username, user_id):
+    username = (username or '').lstrip('@').lower()
+    if not username:
+        return
     with get_connection() as conn:
         cursor = conn.cursor()
         if IS_POSTGRES:
@@ -137,6 +152,9 @@ def save_parsed_user(target, username, user_id):
 
 
 def save_parsed_comment(target, message_id, username, user_id, text):
+    username = (username or '').lstrip('@').lower()
+    if not username:
+        return
     with get_connection() as conn:
         cursor = conn.cursor()
         if IS_POSTGRES:
@@ -151,6 +169,62 @@ def save_parsed_comment(target, message_id, username, user_id, text):
                 'INSERT OR IGNORE INTO parsed_comments(target, message_id, username, user_id, text) '
                 'VALUES (?, ?, ?, ?, ?)',
                 (target, message_id, username, user_id, text),
+            )
+        conn.commit()
+        cursor.close()
+
+
+def get_usernames_for_invite(source_target, invite_target, limit):
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        if IS_POSTGRES:
+            cursor.execute(
+                'SELECT p.username, p.user_id '
+                'FROM parsed_usernames p '
+                'WHERE p.target = %s '
+                'AND NOT EXISTS ('
+                '  SELECT 1 FROM invited_users i '
+                '  WHERE i.invite_target = %s AND i.username = p.username'
+                ') '
+                'ORDER BY p.created_at ASC '
+                'LIMIT %s',
+                (source_target, invite_target, limit),
+            )
+        else:
+            cursor.execute(
+                'SELECT p.username, p.user_id '
+                'FROM parsed_usernames p '
+                'WHERE p.target = ? '
+                'AND NOT EXISTS ('
+                '  SELECT 1 FROM invited_users i '
+                '  WHERE i.invite_target = ? AND i.username = p.username'
+                ') '
+                'ORDER BY p.created_at ASC '
+                'LIMIT ?',
+                (source_target, invite_target, limit),
+            )
+        rows = cursor.fetchall()
+        cursor.close()
+        return rows
+
+
+def mark_invite_result(source_target, invite_target, username, user_id, status, error=''):
+    username = (username or '').lstrip('@').lower()
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        if IS_POSTGRES:
+            cursor.execute(
+                'INSERT INTO invited_users(source_target, invite_target, username, user_id, status, error) '
+                'VALUES (%s, %s, %s, %s, %s, %s) '
+                'ON CONFLICT (invite_target, username) DO UPDATE SET '
+                'status = EXCLUDED.status, error = EXCLUDED.error, source_target = EXCLUDED.source_target',
+                (source_target, invite_target, username, user_id, status, error),
+            )
+        else:
+            cursor.execute(
+                'INSERT OR REPLACE INTO invited_users(source_target, invite_target, username, user_id, status, error) '
+                'VALUES (?, ?, ?, ?, ?, ?)',
+                (source_target, invite_target, username, user_id, status, error),
             )
         conn.commit()
         cursor.close()
