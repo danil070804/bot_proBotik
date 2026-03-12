@@ -16,8 +16,8 @@ import secrets
 import hashlib
 import config
 from getpass import getpass
-from mysql.connector import connect, Error
 import pytz
+from db import get_main_connection, init_db
 
 from pyqiwip2p import QiwiP2P
 from pyqiwip2p.p2p_types import QiwiCustomer, QiwiDatetime
@@ -26,6 +26,7 @@ from pyqiwip2p.p2p_types import QiwiCustomer, QiwiDatetime
 TOKEN = config.bot_invite_token
 bot = telebot.TeleBot(TOKEN)
 admin = config.admin
+init_db()
 
 
 @bot.message_handler(commands=['start'])
@@ -33,20 +34,23 @@ def start_message(message):
 	if message.chat.type == 'private':
 		userid = str(message.chat.id)
 		username = str(message.from_user.username)
-		connection = connect(host=config.bd_host,user=config.bd_login,password=config.bd_pass,database=config.bd_base)
+		connection = get_main_connection()
 		q = connection.cursor()
-		q.execute(f'SELECT * FROM ugc_users WHERE id = "{userid}"')
+		q.execute('SELECT * FROM ugc_users WHERE id = %s', (userid,))
 		row = q.fetchall()
-		if str(row) == '[]':
-			q.execute("INSERT INTO ugc_users (id,data) VALUES ('%s','%s')"%(userid,'Нет'))
+		if not row:
+			q.execute('INSERT INTO ugc_users (id,data) VALUES (%s,%s)', (userid, 'Нет'))
 			connection.commit()
-			q.execute("INSERT INTO invite (id,son_akk,time_vst,random_son,akk,chat_akk	) VALUES ('%s','%s''%s','%s','%s','%s')"%(userid,'Нет','Нет','Нет','Нет','Нет'))
+			q.execute(
+				'INSERT INTO invite (id, son_akk, time_vst, random_son, akk, chat_akk) VALUES (%s, %s, %s, %s, %s, %s)',
+				(userid, 'Нет', 'Нет', 'Нет', 'Нет', 'Нет'),
+			)
 			connection.commit()
 			if message.text[7:] != '':
 				if message.text[7:] != userid:
-					q.execute("update ugc_users set ref = " + str(message.text[7:])+ " where id = " + str(userid))
+					q.execute('UPDATE ugc_users SET ref = %s WHERE id = %s', (message.text[7:], userid))
 					connection.commit()
-					q.execute("update ugc_users set ref_colvo = ref_colvo + 1 where id = " + str(message.text[7:]))
+					q.execute('UPDATE ugc_users SET ref_colvo = ref_colvo + 1 WHERE id = %s', (message.text[7:],))
 					connection.commit()
 					bot.send_message(message.text[7:], f'➕ Новый партнер: @{message.from_user.username}',reply_markup=keyboards.main)
 
@@ -61,27 +65,27 @@ def send_text(message):
 	if message.chat.type == 'private':
 		if message.text.lower() == '/admin':
 			if message.chat.id == admin:
-				connection = connect(host=config.bd_host,user=config.bd_login,password=config.bd_pass,database=config.bd_base)
+				connection = get_main_connection()
 				q = connection.cursor()
-				q.execute(f'SELECT COUNT(id) FROM ugc_users')
+				q.execute('SELECT COUNT(id) FROM ugc_users')
 				all_user_count = q.fetchone()[0]
 
-				q.execute(f'SELECT COUNT(id) FROM ugc_users WHERE data != "Нет"')
+				q.execute("SELECT COUNT(id) FROM ugc_users WHERE data != 'Нет'")
 				all_user_podpiska = q.fetchone()[0]
 
-				q.execute(f'SELECT COUNT(id) FROM akk')
+				q.execute('SELECT COUNT(id) FROM akk')
 				akkakk = q.fetchone()[0]
 
-				q.execute(f'SELECT COUNT(id) FROM list_chat')
+				q.execute('SELECT COUNT(id) FROM list_chat')
 				chat = q.fetchone()[0]
 
-				q.execute(f'SELECT COUNT(id) FROM logi')
+				q.execute('SELECT COUNT(id) FROM logi')
 				colvo_send_1 = q.fetchone()[0]
 
-				q.execute(f'SELECT SUM(colvo_send) FROM list_chat')
+				q.execute('SELECT SUM(colvo_send) FROM list_chat')
 				colvo_sends = q.fetchone()[0]
 
-				q.execute(f'SELECT COUNT(id) FROM list_chat WHERE status = "Send"')
+				q.execute("SELECT COUNT(id) FROM list_chat WHERE status = 'Send'")
 				chat_no_send = q.fetchone()[0]
 
 
@@ -122,9 +126,9 @@ def podcategors(call):
 	
 	if call.data == 'akks':
 		bot.delete_message(chat_id=call.message.chat.id,message_id=call.message.message_id)
-		connection = connect(host=config.bd_host,user=config.bd_login,password=config.bd_pass,database=config.bd_base)	
+		connection = get_main_connection()
 		q = connection.cursor()
-		q.execute(f"SELECT * FROM akk where user = '{call.message.chat.id}'")
+		q.execute('SELECT * FROM akk where user = %s', (call.message.chat.id,))
 		row = q.fetchall()
 		keyboard = types.InlineKeyboardMarkup()
 		for i in row:
@@ -135,22 +139,22 @@ def podcategors(call):
 
 	if call.data[:6] == 'список':
 		bot.delete_message(chat_id=call.message.chat.id,message_id=call.message.message_id)
-		connection = connect(host=config.bd_host,user=config.bd_login,password=config.bd_pass,database=config.bd_base)
-		q = connection.cursor(buffered=True)
-		q.execute(f"SELECT data FROM ugc_users where id = '{call.message.chat.id}'")
+		connection = get_main_connection()
+		q = connection.cursor()
+		q.execute('SELECT data FROM ugc_users where id = %s', (call.message.chat.id,))
 		datas = q.fetchone()[0]
 		if str(datas) != str('Нет'):
 
-			q.execute(f"update ugc_users set akk = '{call.data[6:]}' where id = '{call.message.chat.id}'")
+			q.execute('UPDATE ugc_users SET akk = %s WHERE id = %s', (call.data[6:], call.message.chat.id))
 			connection.commit()
 
 			print(call.data[6:])
 
-			q.execute(f'SELECT akk FROM ugc_users where id =  "{call.message.chat.id}"')
+			q.execute('SELECT akk FROM ugc_users where id = %s', (call.message.chat.id,))
 			akk_akk = q.fetchone()[0]
 			print(akk_akk)
 			
-			q.execute(f'SELECT proxi FROM akk where id =  "{akk_akk}"')
+			q.execute('SELECT proxi FROM akk where id = %s', (akk_akk,))
 			proxi = q.fetchone()[0]
 
 			keyboard = types.InlineKeyboardMarkup()
@@ -173,7 +177,7 @@ def podcategors(call):
 			global tipsend
 			tipsend = call.data[9:]
 			print(tipsend)
-			connection = connect(host=config.bd_host,user=config.bd_login,password=config.bd_pass,database=config.bd_base)
+			connection = get_main_connection()
 			q = connection.cursor()
 			if int(tipsend) == 1:
 				msg= bot.send_message(call.message.chat.id, "Введи новое значение: (Можно использовать формат разметки 'html') | Не указывайте в тексте знаки ' ",parse_mode='HTML')
@@ -206,25 +210,25 @@ def new_data(message):
 	keyboard = types.InlineKeyboardMarkup()
 	keyboard.add(types.InlineKeyboardButton(text=f'''⬅️ Назад''',callback_data=f'akks'))
 	if message.text != '🎛 Меню':
-		connection = connect(host=config.bd_host,user=config.bd_login,password=config.bd_pass,database=config.bd_base)
+		connection = get_main_connection()
 		q = connection.cursor()
-		q.execute(f'SELECT akk FROM ugc_users where id =  "{message.chat.id}"')
+		q.execute('SELECT akk FROM ugc_users where id = %s', (message.chat.id,))
 		chat_chat = q.fetchone()[0]
 		q = connection.cursor()
 		if int(tipsend) == 1:
-			q.execute(f"update invite set chat_akk = '{message.text}'")
+			q.execute('UPDATE invite SET chat_akk = %s WHERE id = %s', (message.text, message.chat.id))
 			connection.commit()
 			bot.send_message(message.chat.id, "Успешно",parse_mode='HTML')
 		if int(tipsend) == 2:
-			q.execute(f"update invite set son_akk = '{message.text}' where akk = '{chat_chat}'")
+			q.execute('UPDATE invite SET son_akk = %s WHERE akk = %s', (message.text, chat_chat))
 			connection.commit()
 			bot.send_message(message.chat.id, "Успешно",parse_mode='HTML')
 		if int(tipsend) == 3:
-			q.execute(f"update invite set time_vst = '{message.text}' where akk = '{chat_chat}'")
+			q.execute('UPDATE invite SET time_vst = %s WHERE akk = %s', (message.text, chat_chat))
 			connection.commit()
 			bot.send_message(message.chat.id, "Успешно",parse_mode='HTML')
 		if int(tipsend) == 4:
-			q.execute(f"update invite set random_son = '{message.text}' where akk = '{chat_chat}'")
+			q.execute('UPDATE invite SET random_son = %s WHERE akk = %s', (message.text, chat_chat))
 			connection.commit()
 			bot.send_message(message.chat.id, "Успешно",parse_mode='HTML')
 		if int(tipsend) == 9:
