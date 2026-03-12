@@ -6,6 +6,8 @@ import sqlite3
 import random, string
 import time
 import os,random,shutil,subprocess
+import sys
+import glob
 import json
 import keyboards
 import requests
@@ -27,6 +29,50 @@ TOKEN = config.bot_invite_token
 bot = telebot.TeleBot(TOKEN)
 admin = config.admin
 init_db()
+USER_STATE = {}
+RUNNING_TASKS = {}
+
+
+def build_new_menu():
+	keyboard = types.InlineKeyboardMarkup()
+	keyboard.add(
+		types.InlineKeyboardButton(text='📂 Аккаунты (.session)', callback_data='accounts_menu'),
+		types.InlineKeyboardButton(text='🔎 Парсинг', callback_data='parser_start'),
+	)
+	keyboard.add(
+		types.InlineKeyboardButton(text='📨 Инвайт', callback_data='inviter_start'),
+		types.InlineKeyboardButton(text='📊 Статус задач', callback_data='task_status'),
+	)
+	keyboard.add(types.InlineKeyboardButton(text='ℹ️ Помощь', callback_data='help_new'))
+	return keyboard
+
+
+def list_sessions():
+	return glob.glob('*.session')
+
+
+def _save_targets_file(user_id, text_value, prefix):
+	filename = f'{prefix}_{user_id}.txt'
+	rows = []
+	for raw in str(text_value).replace('\r', '\n').split('\n'):
+		for part in raw.split(','):
+			item = part.strip()
+			if item != '':
+				rows.append(item)
+	with open(filename, 'w', encoding='utf-8') as f:
+		for row in rows:
+			f.write(row + '\n')
+	return filename, len(rows)
+
+
+def _start_process(user_id, title, command):
+	proc = subprocess.Popen(command)
+	RUNNING_TASKS.setdefault(user_id, []).append({
+		'title': title,
+		'cmd': ' '.join(command),
+		'proc': proc
+	})
+	return proc.pid
 
 
 @bot.message_handler(commands=['start'])
@@ -58,7 +104,8 @@ def start_message(message):
 			keyboard.add(types.InlineKeyboardButton(text=f'''💢 Как работает сервис ?!''',url=f'https://telegra.ph/Informaciya-po-proektu-10-29'))
 			bot.send_message(message.chat.id,f'💡 Перед началом использования сервиса, пожалуйста, ознакомьтесь со статьей: https://telegra.ph/Informaciya-po-proektu-10-29',parse_mode='HTML',reply_markup=keyboard, disable_web_page_preview=True)
 
-		bot.send_message(message.chat.id,f'👑 Добро пожаловать в бот для автопостинга !',parse_mode='HTML',reply_markup=keyboards.main)
+		bot.send_message(message.chat.id, '👑 Добро пожаловать! Управление через кнопки ниже.', parse_mode='HTML', reply_markup=keyboards.main)
+		bot.send_message(message.chat.id, '◾️ Основное меню:', parse_mode='HTML', reply_markup=build_new_menu())
 
 @bot.message_handler(content_types=['text'])
 def send_text(message):
@@ -103,14 +150,149 @@ def send_text(message):
 👣Очередь: {chat_no_send}''',parse_mode='HTML', reply_markup=keyboard)
 
 		elif message.text.lower() == '🎛 меню':
-			keyboard = types.InlineKeyboardMarkup()
-			keyboard.add(types.InlineKeyboardButton(text=f'''Инвайтер''',callback_data=f'akks'),types.InlineKeyboardButton(text=f'''Настройка инвайтера''',callback_data=f'Multi'))
-			keyboard.add(types.InlineKeyboardButton(text=f'''🖥 Профиль''',callback_data=f'profale'),types.InlineKeyboardButton(text=f'''📖 Информация''',callback_data=f'info'))
-			bot.send_message(message.chat.id, f'''◾️ Выберите нужный пункт меню:''',parse_mode='HTML', reply_markup=keyboard)
+			bot.send_message(message.chat.id, '◾️ Выберите нужный пункт меню:', parse_mode='HTML', reply_markup=build_new_menu())
 			return
+
+
+@bot.message_handler(content_types=['document'])
+def receive_session_file(message):
+	if message.chat.type != 'private':
+		return
+	doc = message.document
+	if not doc or not str(doc.file_name).lower().endswith('.session'):
+		bot.send_message(message.chat.id, 'Пришлите файл формата .session')
+		return
+	file_info = bot.get_file(doc.file_id)
+	data = bot.download_file(file_info.file_path)
+	filename = os.path.basename(doc.file_name)
+	with open(filename, 'wb') as f:
+		f.write(data)
+	bot.send_message(message.chat.id, f'Аккаунт добавлен: {filename}\nВсего аккаунтов: {len(list_sessions())}')
+
+
+def parser_step_sources(message):
+	USER_STATE[message.chat.id] = {'flow': 'parser', 'sources': message.text}
+	msg = bot.send_message(message.chat.id, 'Введите posts-limit (пример: 100):')
+	bot.register_next_step_handler(msg, parser_step_posts)
+
+
+def parser_step_posts(message):
+	state = USER_STATE.get(message.chat.id, {})
+	try:
+		state['posts_limit'] = int(message.text.strip())
+	except (TypeError, ValueError):
+		state['posts_limit'] = 100
+	USER_STATE[message.chat.id] = state
+	msg = bot.send_message(message.chat.id, 'Введите comments-limit (пример: 200):')
+	bot.register_next_step_handler(msg, parser_step_comments)
+
+
+def parser_step_comments(message):
+	state = USER_STATE.get(message.chat.id, {})
+	try:
+		comments_limit = int(message.text.strip())
+	except (TypeError, ValueError):
+		comments_limit = 200
+	file_name, sources_count = _save_targets_file(message.chat.id, state.get('sources', ''), 'parser_sources')
+	command = [
+		sys.executable, 'parser.py',
+		'--targets-file', file_name,
+		'--posts-limit', str(state.get('posts_limit', 100)),
+		'--comments-limit', str(comments_limit),
+		'--use-all-sessions'
+	]
+	pid = _start_process(message.chat.id, f'parser ({sources_count} sources)', command)
+	bot.send_message(message.chat.id, f'Парсинг запущен (PID {pid}). Источников: {sources_count}')
+
+
+def inviter_step_sources(message):
+	USER_STATE[message.chat.id] = {'flow': 'inviter', 'sources': message.text}
+	msg = bot.send_message(message.chat.id, 'Введите @username целевого чата/канала для инвайта:')
+	bot.register_next_step_handler(msg, inviter_step_target)
+
+
+def inviter_step_target(message):
+	state = USER_STATE.get(message.chat.id, {})
+	state['invite_target'] = message.text.strip()
+	USER_STATE[message.chat.id] = state
+	msg = bot.send_message(message.chat.id, 'Введите лимит пользователей за запуск (пример: 100):')
+	bot.register_next_step_handler(msg, inviter_step_limit)
+
+
+def inviter_step_limit(message):
+	state = USER_STATE.get(message.chat.id, {})
+	try:
+		state['limit'] = int(message.text.strip())
+	except (TypeError, ValueError):
+		state['limit'] = 100
+	USER_STATE[message.chat.id] = state
+	msg = bot.send_message(message.chat.id, 'Введите паузу между инвайтами в секундах (пример: 15):')
+	bot.register_next_step_handler(msg, inviter_step_sleep)
+
+
+def inviter_step_sleep(message):
+	state = USER_STATE.get(message.chat.id, {})
+	try:
+		sleep_sec = int(message.text.strip())
+	except (TypeError, ValueError):
+		sleep_sec = 15
+	file_name, sources_count = _save_targets_file(message.chat.id, state.get('sources', ''), 'inviter_sources')
+	command = [
+		sys.executable, 'inviter.py',
+		'--sources-file', file_name,
+		'--invite-target', state.get('invite_target', ''),
+		'--limit', str(state.get('limit', 100)),
+		'--sleep', str(sleep_sec),
+		'--use-all-sessions'
+	]
+	pid = _start_process(message.chat.id, f'inviter ({sources_count} sources)', command)
+	bot.send_message(message.chat.id, f'Инвайт запущен (PID {pid}). Источников: {sources_count}')
 
 @bot.callback_query_handler(func=lambda call:True)
 def podcategors(call):
+	if call.data == 'accounts_menu':
+		sessions = list_sessions()
+		bot.send_message(
+			call.message.chat.id,
+			f'Аккаунтов загружено: {len(sessions)}\nПришлите .session файлы сюда документом.'
+		)
+		return
+
+	if call.data == 'parser_start':
+		msg = bot.send_message(
+			call.message.chat.id,
+			'Отправьте источники для парса (через запятую или с новой строки).\nПример:\n@chat1\n@chat2'
+		)
+		bot.register_next_step_handler(msg, parser_step_sources)
+		return
+
+	if call.data == 'inviter_start':
+		msg = bot.send_message(
+			call.message.chat.id,
+			'Отправьте источники, из которых брать пользователей для инвайта (через запятую или с новой строки).'
+		)
+		bot.register_next_step_handler(msg, inviter_step_sources)
+		return
+
+	if call.data == 'task_status':
+		items = RUNNING_TASKS.get(call.message.chat.id, [])
+		if len(items) == 0:
+			bot.send_message(call.message.chat.id, 'Активных задач нет.')
+			return
+		lines = []
+		for idx, item in enumerate(items, start=1):
+			proc = item['proc']
+			status = 'running' if proc.poll() is None else f'finished ({proc.poll()})'
+			lines.append(f'{idx}. {item["title"]} - {status} - PID {proc.pid}')
+		bot.send_message(call.message.chat.id, '\n'.join(lines))
+		return
+
+	if call.data == 'help_new':
+		bot.send_message(
+			call.message.chat.id,
+			'Как пользоваться:\n1) Загрузите .session аккаунты.\n2) Нажмите "Парсинг" и укажите источники.\n3) Нажмите "Инвайт", укажите источники и цель.\nСтатусы инвайта сохраняются в базе.'
+		)
+		return
 #	if call.data == 'Multi':
 #			bot.delete_message(chat_id=call.message.chat.id,message_id=call.message.message_id)
 #			keyboard = types.InlineKeyboardMarkup()
