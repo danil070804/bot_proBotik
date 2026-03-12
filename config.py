@@ -35,3 +35,7 @@ API_HASH = os.getenv('TG_API_HASH', '')
 
 # Database connection for Railway Postgres
 DATABASE_URL = os.getenv('DATABASE_URL', '')
+
+# Inviter safety controls
+invite_per_account_limit = _int_env('INVITE_PER_ACCOUNT_LIMIT', 25)
+invite_max_flood_wait = _int_env('INVITE_MAX_FLOOD_WAIT', 600)

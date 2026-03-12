@@ -14,7 +14,7 @@ from telethon.tl.functions.messages import AddChatUserRequest
 from telethon.tl.types import InputPeerChannel, InputPeerChat
 from telethon.tl.functions.channels import JoinChannelRequest
 
-from config import API_ID, API_HASH
+from config import API_ID, API_HASH, invite_per_account_limit, invite_max_flood_wait
 from db import get_usernames_for_invite, mark_invite_result
 from functions import get_proxy, get_sessions
 
@@ -75,17 +75,22 @@ async def ensure_join_target(client, invite_target):
         logger.warning(f'Не удалось вступить в целевой чат {invite_target}: {e}')
 
 
-async def invite_batch_with_session(session, source_target, invite_target, rows, sleep_seconds, proxy):
+async def invite_batch_with_session(session, source_target, invite_target, rows, sleep_seconds, proxy, per_account_limit, max_flood_wait):
     client = TelegramClient(session, API_ID, API_HASH, proxy=proxy)
     await client.start()
     await ensure_join_target(client, invite_target)
     logger.info(f'Инвайтер запущен: session={session}, source={source_target}, users={len(rows)}')
 
+    invited_count = 0
     for username, user_id in rows:
+        if invited_count >= per_account_limit:
+            logger.warning(f'{session}: достигнут лимит на аккаунт ({per_account_limit})')
+            break
         try:
             await invite_one(client, invite_target, username)
             mark_invite_result(source_target, invite_target, username, user_id, 'invited', '')
             logger.info(f'Добавлен: @{username}')
+            invited_count += 1
         except UserAlreadyParticipantError:
             mark_invite_result(source_target, invite_target, username, user_id, 'already', '')
         except UserPrivacyRestrictedError:
@@ -98,6 +103,9 @@ async def invite_batch_with_session(session, source_target, invite_target, rows,
             break
         except FloodWaitError as e:
             mark_invite_result(source_target, invite_target, username, user_id, 'flood_wait', str(e.seconds))
+            if int(e.seconds) > max_flood_wait:
+                logger.error(f'FloodWait {e.seconds}s > лимита {max_flood_wait}s, остановка аккаунта {session}')
+                break
             await asyncio.sleep(int(e.seconds))
         except Exception as e:
             mark_invite_result(source_target, invite_target, username, user_id, 'error', str(e))
@@ -115,7 +123,7 @@ def _split_rows(rows, buckets):
     return chunks
 
 
-async def run_inviter(source_target, sources_file, invite_target, limit, sleep_seconds, session_index, use_all_sessions):
+async def run_inviter(source_target, sources_file, invite_target, limit, sleep_seconds, session_index, use_all_sessions, per_account_limit, max_flood_wait):
     if not API_ID or not API_HASH:
         raise RuntimeError('Set TG_API_ID and TG_API_HASH env vars')
     invite_target = _normalize_target(invite_target)
@@ -152,6 +160,8 @@ async def run_inviter(source_target, sources_file, invite_target, limit, sleep_s
                         batch,
                         sleep_seconds,
                         proxy,
+                        per_account_limit,
+                        max_flood_wait,
                     )
                 )
             )
@@ -169,6 +179,8 @@ if __name__ == '__main__':
     p.add_argument('--sleep', type=int, default=15, help='Sleep between invites in seconds')
     p.add_argument('--session-index', type=int, default=0, help='Use one account by index')
     p.add_argument('--use-all-sessions', action='store_true', help='Distribute invites across all added accounts')
+    p.add_argument('--per-account-limit', type=int, default=invite_per_account_limit, help='Max successful invites per account')
+    p.add_argument('--max-flood-wait', type=int, default=invite_max_flood_wait, help='Stop account if FloodWait is higher')
     args = p.parse_args()
     asyncio.run(
         run_inviter(
@@ -179,5 +191,7 @@ if __name__ == '__main__':
             sleep_seconds=args.sleep,
             session_index=args.session_index,
             use_all_sessions=args.use_all_sessions,
+            per_account_limit=max(1, args.per_account_limit),
+            max_flood_wait=max(1, args.max_flood_wait),
         )
     )

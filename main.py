@@ -8,6 +8,8 @@ import time
 import os,random,shutil,subprocess
 import sys
 import glob
+import threading
+from queue import Queue
 import json
 import keyboards
 import requests
@@ -31,6 +33,8 @@ admin = config.admin
 init_db()
 USER_STATE = {}
 RUNNING_TASKS = {}
+TASK_QUEUE = Queue()
+TASK_LOCK = threading.Lock()
 
 
 def build_new_menu():
@@ -65,14 +69,48 @@ def _save_targets_file(user_id, text_value, prefix):
 	return filename, len(rows)
 
 
-def _start_process(user_id, title, command):
-	proc = subprocess.Popen(command)
-	RUNNING_TASKS.setdefault(user_id, []).append({
+def _queue_worker():
+	while True:
+		item = TASK_QUEUE.get()
+		with TASK_LOCK:
+			item['status'] = 'running'
+		proc = subprocess.Popen(item['command'])
+		item['pid'] = proc.pid
+		try:
+			bot.send_message(item['user_id'], f'▶️ Запущено: {item["title"]} (PID {proc.pid})')
+		except Exception:
+			pass
+		code = proc.wait()
+		with TASK_LOCK:
+			item['status'] = f'finished ({code})'
+		try:
+			bot.send_message(item['user_id'], f'✅ Завершено: {item["title"]} (code {code})')
+		except Exception:
+			pass
+		TASK_QUEUE.task_done()
+
+
+def _ensure_worker():
+	if getattr(_ensure_worker, 'started', False):
+		return
+	t = threading.Thread(target=_queue_worker, daemon=True)
+	t.start()
+	_ensure_worker.started = True
+
+
+def _enqueue_process(user_id, title, command):
+	_ensure_worker()
+	item = {
+		'user_id': user_id,
 		'title': title,
-		'cmd': ' '.join(command),
-		'proc': proc
-	})
-	return proc.pid
+		'command': command,
+		'status': 'queued',
+		'pid': None,
+	}
+	with TASK_LOCK:
+		RUNNING_TASKS.setdefault(user_id, []).append(item)
+	TASK_QUEUE.put(item)
+	return TASK_QUEUE.qsize()
 
 
 @bot.message_handler(commands=['start'])
@@ -201,8 +239,8 @@ def parser_step_comments(message):
 		'--comments-limit', str(comments_limit),
 		'--use-all-sessions'
 	]
-	pid = _start_process(message.chat.id, f'parser ({sources_count} sources)', command)
-	bot.send_message(message.chat.id, f'Парсинг запущен (PID {pid}). Источников: {sources_count}')
+	queue_pos = _enqueue_process(message.chat.id, f'parser ({sources_count} sources)', command)
+	bot.send_message(message.chat.id, f'Парсинг добавлен в очередь. Источников: {sources_count}. Позиция в очереди: ~{queue_pos}')
 
 
 def inviter_step_sources(message):
@@ -243,10 +281,12 @@ def inviter_step_sleep(message):
 		'--invite-target', state.get('invite_target', ''),
 		'--limit', str(state.get('limit', 100)),
 		'--sleep', str(sleep_sec),
+		'--per-account-limit', str(config.invite_per_account_limit),
+		'--max-flood-wait', str(config.invite_max_flood_wait),
 		'--use-all-sessions'
 	]
-	pid = _start_process(message.chat.id, f'inviter ({sources_count} sources)', command)
-	bot.send_message(message.chat.id, f'Инвайт запущен (PID {pid}). Источников: {sources_count}')
+	queue_pos = _enqueue_process(message.chat.id, f'inviter ({sources_count} sources)', command)
+	bot.send_message(message.chat.id, f'Инвайт добавлен в очередь. Источников: {sources_count}. Позиция в очереди: ~{queue_pos}')
 
 @bot.callback_query_handler(func=lambda call:True)
 def podcategors(call):
@@ -281,16 +321,18 @@ def podcategors(call):
 			return
 		lines = []
 		for idx, item in enumerate(items, start=1):
-			proc = item['proc']
-			status = 'running' if proc.poll() is None else f'finished ({proc.poll()})'
-			lines.append(f'{idx}. {item["title"]} - {status} - PID {proc.pid}')
+			status = item.get('status', 'queued')
+			pid = item.get('pid')
+			pid_text = f'PID {pid}' if pid else 'PID -'
+			lines.append(f'{idx}. {item["title"]} - {status} - {pid_text}')
+		lines.append(f'Очередь (глобально): {TASK_QUEUE.qsize()}')
 		bot.send_message(call.message.chat.id, '\n'.join(lines))
 		return
 
 	if call.data == 'help_new':
 		bot.send_message(
 			call.message.chat.id,
-			'Как пользоваться:\n1) Загрузите .session аккаунты.\n2) Нажмите "Парсинг" и укажите источники.\n3) Нажмите "Инвайт", укажите источники и цель.\nСтатусы инвайта сохраняются в базе.'
+			'Как пользоваться:\n1) Загрузите .session аккаунты.\n2) Нажмите "Парсинг" и укажите источники.\n3) Нажмите "Инвайт", укажите источники и цель.\nЗадачи идут через очередь, а инвайт ограничен антифлуд-лимитами.'
 		)
 		return
 #	if call.data == 'Multi':
