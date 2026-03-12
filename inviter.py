@@ -12,6 +12,7 @@ from telethon.errors import (
 from telethon.tl.functions.channels import InviteToChannelRequest
 from telethon.tl.functions.messages import AddChatUserRequest
 from telethon.tl.types import InputPeerChannel, InputPeerChat
+from telethon.tl.functions.channels import JoinChannelRequest
 
 from config import API_ID, API_HASH
 from db import get_usernames_for_invite, mark_invite_result
@@ -19,6 +20,36 @@ from functions import get_proxy, get_sessions
 
 
 logger.add('logging.log', rotation='1 MB', encoding='utf-8')
+
+
+def _normalize_target(target):
+    t = (target or '').strip()
+    if not t:
+        return ''
+    if t.startswith('https://t.me/'):
+        return '@' + t.replace('https://t.me/', '').strip('@')
+    if t.startswith('@'):
+        return t
+    return '@' + t
+
+
+def _read_sources(single_source, sources_file):
+    sources = []
+    if single_source:
+        sources.append(_normalize_target(single_source))
+    if sources_file:
+        with open(sources_file, 'r', encoding='utf-8') as f:
+            for line in f:
+                item = _normalize_target(line.strip())
+                if item:
+                    sources.append(item)
+    uniq = []
+    seen = set()
+    for s in sources:
+        if s and s not in seen:
+            seen.add(s)
+            uniq.append(s)
+    return uniq
 
 
 async def invite_one(client, invite_target, username):
@@ -33,25 +64,22 @@ async def invite_one(client, invite_target, username):
         raise RuntimeError('Unsupported invite target type')
 
 
-async def run_inviter(source_target, invite_target, limit, sleep_seconds, session_index):
-    if not API_ID or not API_HASH:
-        raise RuntimeError('Set TG_API_ID and TG_API_HASH env vars')
-    sessions = get_sessions()
-    if not sessions:
-        raise RuntimeError('No .session files found')
-    if session_index < 0 or session_index >= len(sessions):
-        raise RuntimeError(f'session-index out of range: 0..{len(sessions) - 1}')
-
-    rows = get_usernames_for_invite(source_target, invite_target, limit)
-    if not rows:
-        logger.info('Нет пользователей для инвайта')
+async def ensure_join_target(client, invite_target):
+    try:
+        entity = await client.get_entity(invite_target)
+        if getattr(entity, 'username', None):
+            await client(JoinChannelRequest(entity.username))
+    except UserAlreadyParticipantError:
         return
+    except Exception as e:
+        logger.warning(f'Не удалось вступить в целевой чат {invite_target}: {e}')
 
-    proxy = get_proxy()
-    session = sessions[session_index]
+
+async def invite_batch_with_session(session, source_target, invite_target, rows, sleep_seconds, proxy):
     client = TelegramClient(session, API_ID, API_HASH, proxy=proxy)
     await client.start()
-    logger.info(f'Инвайтер запущен: session={session}, users={len(rows)}')
+    await ensure_join_target(client, invite_target)
+    logger.info(f'Инвайтер запущен: session={session}, source={source_target}, users={len(rows)}')
 
     for username, user_id in rows:
         try:
@@ -61,7 +89,9 @@ async def run_inviter(source_target, invite_target, limit, sleep_seconds, sessio
         except UserAlreadyParticipantError:
             mark_invite_result(source_target, invite_target, username, user_id, 'already', '')
         except UserPrivacyRestrictedError:
-            mark_invite_result(source_target, invite_target, username, user_id, 'privacy', 'User privacy restricted')
+            msg = f'Пользователь @{username} не добавлен: запретил приглашения'
+            mark_invite_result(source_target, invite_target, username, user_id, 'privacy', msg)
+            logger.warning(msg)
         except PeerFloodError:
             mark_invite_result(source_target, invite_target, username, user_id, 'peer_flood', 'PeerFloodError')
             logger.error('PeerFloodError: остановка инвайта для защиты аккаунта')
@@ -74,23 +104,80 @@ async def run_inviter(source_target, invite_target, limit, sleep_seconds, sessio
         await asyncio.sleep(max(0, sleep_seconds))
 
     await client.disconnect()
+
+
+def _split_rows(rows, buckets):
+    if buckets <= 1:
+        return [rows]
+    chunks = [[] for _ in range(buckets)]
+    for idx, row in enumerate(rows):
+        chunks[idx % buckets].append(row)
+    return chunks
+
+
+async def run_inviter(source_target, sources_file, invite_target, limit, sleep_seconds, session_index, use_all_sessions):
+    if not API_ID or not API_HASH:
+        raise RuntimeError('Set TG_API_ID and TG_API_HASH env vars')
+    invite_target = _normalize_target(invite_target)
+    sources = _read_sources(source_target, sources_file)
+    if not sources:
+        raise RuntimeError('Set --source-target or --sources-file')
+
+    sessions = get_sessions()
+    if not sessions:
+        raise RuntimeError('No .session files found')
+    if not use_all_sessions and (session_index < 0 or session_index >= len(sessions)):
+        raise RuntimeError(f'session-index out of range: 0..{len(sessions) - 1}')
+
+    proxy = get_proxy()
+    selected_sessions = sessions if use_all_sessions else [sessions[session_index]]
+    total_limit_per_source = max(1, limit)
+
+    for src in sources:
+        rows = get_usernames_for_invite(src, invite_target, total_limit_per_source)
+        if not rows:
+            logger.info(f'Нет пользователей для инвайта из {src}')
+            continue
+        chunks = _split_rows(rows, len(selected_sessions))
+        tasks = []
+        for idx, batch in enumerate(chunks):
+            if not batch:
+                continue
+            tasks.append(
+                asyncio.create_task(
+                    invite_batch_with_session(
+                        selected_sessions[idx],
+                        src,
+                        invite_target,
+                        batch,
+                        sleep_seconds,
+                        proxy,
+                    )
+                )
+            )
+        if tasks:
+            await asyncio.gather(*tasks)
     logger.info('Инвайт завершен')
 
 
 if __name__ == '__main__':
     p = argparse.ArgumentParser(description='Invite parsed usernames to target chat/channel')
-    p.add_argument('--source-target', required=True, help='Source parsed target, e.g. @source_chat')
+    p.add_argument('--source-target', default='', help='Single source parsed target')
+    p.add_argument('--sources-file', default='', help='File with source targets (one per line)')
     p.add_argument('--invite-target', required=True, help='Target where users will be invited')
     p.add_argument('--limit', type=int, default=50, help='Max users per run')
     p.add_argument('--sleep', type=int, default=15, help='Sleep between invites in seconds')
-    p.add_argument('--session-index', type=int, default=0, help='Which .session to use')
+    p.add_argument('--session-index', type=int, default=0, help='Use one account by index')
+    p.add_argument('--use-all-sessions', action='store_true', help='Distribute invites across all added accounts')
     args = p.parse_args()
     asyncio.run(
         run_inviter(
             source_target=args.source_target,
+            sources_file=args.sources_file,
             invite_target=args.invite_target,
             limit=args.limit,
             sleep_seconds=args.sleep,
             session_index=args.session_index,
+            use_all_sessions=args.use_all_sessions,
         )
     )

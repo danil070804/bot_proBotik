@@ -179,29 +179,43 @@ def get_usernames_for_invite(source_target, invite_target, limit):
         cursor = conn.cursor()
         if IS_POSTGRES:
             cursor.execute(
-                'SELECT p.username, p.user_id '
-                'FROM parsed_usernames p '
-                'WHERE p.target = %s '
-                'AND NOT EXISTS ('
-                '  SELECT 1 FROM invited_users i '
-                '  WHERE i.invite_target = %s AND i.username = p.username'
+                'WITH src AS ('
+                '  SELECT p.username, p.user_id, p.created_at '
+                '  FROM parsed_usernames p WHERE p.target = %s '
+                '  UNION '
+                '  SELECT c.username, c.user_id, c.created_at '
+                '  FROM parsed_comments c WHERE c.target = %s'
                 ') '
-                'ORDER BY p.created_at ASC '
+                'SELECT s.username, MAX(s.user_id) '
+                'FROM src s '
+                'WHERE NOT EXISTS ('
+                '  SELECT 1 FROM invited_users i '
+                '  WHERE i.invite_target = %s AND i.username = s.username'
+                ') '
+                'GROUP BY s.username '
+                'ORDER BY MIN(s.created_at) ASC '
                 'LIMIT %s',
-                (source_target, invite_target, limit),
+                (source_target, source_target, invite_target, limit),
             )
         else:
             cursor.execute(
-                'SELECT p.username, p.user_id '
-                'FROM parsed_usernames p '
-                'WHERE p.target = ? '
-                'AND NOT EXISTS ('
-                '  SELECT 1 FROM invited_users i '
-                '  WHERE i.invite_target = ? AND i.username = p.username'
+                'WITH src AS ('
+                '  SELECT p.username AS username, p.user_id AS user_id, p.created_at AS created_at '
+                '  FROM parsed_usernames p WHERE p.target = ? '
+                '  UNION '
+                '  SELECT c.username AS username, c.user_id AS user_id, c.created_at AS created_at '
+                '  FROM parsed_comments c WHERE c.target = ?'
                 ') '
-                'ORDER BY p.created_at ASC '
+                'SELECT s.username, MAX(s.user_id) '
+                'FROM src s '
+                'WHERE NOT EXISTS ('
+                '  SELECT 1 FROM invited_users i '
+                '  WHERE i.invite_target = ? AND i.username = s.username'
+                ') '
+                'GROUP BY s.username '
+                'ORDER BY MIN(s.created_at) ASC '
                 'LIMIT ?',
-                (source_target, invite_target, limit),
+                (source_target, source_target, invite_target, limit),
             )
         rows = cursor.fetchall()
         cursor.close()
