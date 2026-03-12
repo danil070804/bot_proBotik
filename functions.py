@@ -6,7 +6,9 @@ import python_socks
 
 def get_chats():
     chats = []
-    with open(file1, 'r') as file:
+    if not os.path.exists(file1):
+        return chats
+    with open(file1, 'r', encoding='utf-8') as file:
         for chat in file.readlines():
             chat = chat.replace('\n', '')
             chats.append(chat)
@@ -15,7 +17,12 @@ def get_chats():
 
 def generate_chats_list():
     chats = get_chats()
-    my_len = len(chats) // len(get_sessions())
+    sessions_count = len(get_sessions())
+    if sessions_count == 0 or len(chats) == 0:
+        return []
+    my_len = len(chats) // sessions_count
+    if my_len <= 0:
+        my_len = 1
     if my_len > full_chats:
         chats_gen = chats_for_acc(chats, full_chats)
     else:
