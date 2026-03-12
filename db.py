@@ -40,7 +40,7 @@ def init_db():
                 "id BIGINT PRIMARY KEY, son_akk TEXT DEFAULT 'Нет', time_vst TEXT DEFAULT 'Нет', "
                 "random_son TEXT DEFAULT 'Нет', akk TEXT DEFAULT 'Нет', chat_akk TEXT DEFAULT 'Нет')"
             )
-            cursor.execute('CREATE TABLE IF NOT EXISTS akk(id BIGSERIAL PRIMARY KEY, user BIGINT, name_akk TEXT, proxi TEXT)')
+            cursor.execute('CREATE TABLE IF NOT EXISTS akk(id BIGSERIAL PRIMARY KEY, user_id BIGINT, name_akk TEXT, proxi TEXT)')
             cursor.execute('CREATE TABLE IF NOT EXISTS list_chat(id BIGSERIAL PRIMARY KEY, status TEXT, colvo_send INTEGER DEFAULT 0)')
             cursor.execute('CREATE TABLE IF NOT EXISTS logi(id BIGSERIAL PRIMARY KEY)')
             cursor.execute(
@@ -66,7 +66,7 @@ def init_db():
                 'id INTEGER PRIMARY KEY, son_akk TEXT DEFAULT "Нет", time_vst TEXT DEFAULT "Нет", '
                 'random_son TEXT DEFAULT "Нет", akk TEXT DEFAULT "Нет", chat_akk TEXT DEFAULT "Нет")'
             )
-            cursor.execute('CREATE TABLE IF NOT EXISTS akk(id INTEGER PRIMARY KEY AUTOINCREMENT, user INTEGER, name_akk TEXT, proxi TEXT)')
+            cursor.execute('CREATE TABLE IF NOT EXISTS akk(id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, name_akk TEXT, proxi TEXT)')
             cursor.execute('CREATE TABLE IF NOT EXISTS list_chat(id INTEGER PRIMARY KEY AUTOINCREMENT, status TEXT, colvo_send INTEGER DEFAULT 0)')
             cursor.execute('CREATE TABLE IF NOT EXISTS logi(id INTEGER PRIMARY KEY AUTOINCREMENT)')
             cursor.execute(

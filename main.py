@@ -128,7 +128,7 @@ def podcategors(call):
 		bot.delete_message(chat_id=call.message.chat.id,message_id=call.message.message_id)
 		connection = get_main_connection()
 		q = connection.cursor()
-		q.execute('SELECT * FROM akk where user = %s', (call.message.chat.id,))
+		q.execute('SELECT * FROM akk where user_id = %s', (call.message.chat.id,))
 		row = q.fetchall()
 		keyboard = types.InlineKeyboardMarkup()
 		for i in row:
