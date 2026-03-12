@@ -47,6 +47,10 @@ def build_new_menu():
 		types.InlineKeyboardButton(text='📨 Инвайт', callback_data='inviter_start'),
 		types.InlineKeyboardButton(text='📊 Статус задач', callback_data='task_status'),
 	)
+	keyboard.add(
+		types.InlineKeyboardButton(text='⚙️ Управление', callback_data='manage_menu'),
+		types.InlineKeyboardButton(text='📈 Аналитика', callback_data='stats_overview'),
+	)
 	keyboard.add(types.InlineKeyboardButton(text='ℹ️ Помощь', callback_data='help_new'))
 	return keyboard
 
@@ -76,6 +80,7 @@ def _queue_worker():
 			item['status'] = 'running'
 		proc = subprocess.Popen(item['command'])
 		item['pid'] = proc.pid
+		item['proc'] = proc
 		try:
 			bot.send_message(item['user_id'], f'▶️ Запущено: {item["title"]} (PID {proc.pid})')
 		except Exception:
@@ -106,11 +111,60 @@ def _enqueue_process(user_id, title, command):
 		'command': command,
 		'status': 'queued',
 		'pid': None,
+		'proc': None,
 	}
 	with TASK_LOCK:
 		RUNNING_TASKS.setdefault(user_id, []).append(item)
 	TASK_QUEUE.put(item)
 	return TASK_QUEUE.qsize()
+
+
+def _is_cancel(text):
+	return str(text).strip().lower() in ['отмена', 'cancel', 'меню', 'menu']
+
+
+def _build_manage_menu():
+	keyboard = types.InlineKeyboardMarkup()
+	keyboard.add(types.InlineKeyboardButton(text='🛑 Остановить задачу', callback_data='task_stop_menu'))
+	keyboard.add(types.InlineKeyboardButton(text='🧹 Очистить завершенные', callback_data='task_clear_done'))
+	keyboard.add(types.InlineKeyboardButton(text='⬅️ Назад', callback_data='main_menu'))
+	return keyboard
+
+
+def _build_accounts_menu():
+	keyboard = types.InlineKeyboardMarkup()
+	keyboard.add(
+		types.InlineKeyboardButton(text='📄 Список аккаунтов', callback_data='accounts_list'),
+		types.InlineKeyboardButton(text='🗑 Удалить аккаунт', callback_data='accounts_delete_menu'),
+	)
+	keyboard.add(types.InlineKeyboardButton(text='⬅️ Назад', callback_data='main_menu'))
+	return keyboard
+
+
+def _stats_text():
+	try:
+		connection = get_main_connection()
+		q = connection.cursor()
+		q.execute('SELECT COUNT(*) FROM parsed_usernames')
+		parsed_users = q.fetchone()[0] or 0
+		q.execute('SELECT COUNT(*) FROM parsed_comments')
+		parsed_comments = q.fetchone()[0] or 0
+		q.execute('SELECT status, COUNT(*) FROM invited_users GROUP BY status')
+		rows = q.fetchall()
+		status_map = {r[0]: r[1] for r in rows}
+		connection.close()
+		return (
+			f'📈 Аналитика:\n'
+			f'Юзернеймов в базе: {parsed_users}\n'
+			f'Комментариев в базе: {parsed_comments}\n'
+			f'Invited: {status_map.get("invited", 0)}\n'
+			f'Already: {status_map.get("already", 0)}\n'
+			f'Privacy: {status_map.get("privacy", 0)}\n'
+			f'Flood/PeerFlood: {status_map.get("flood_wait", 0) + status_map.get("peer_flood", 0)}\n'
+			f'Errors: {status_map.get("error", 0)}'
+		)
+	except Exception as e:
+		return f'Не удалось собрать аналитику: {e}'
 
 
 @bot.message_handler(commands=['start'])
@@ -209,12 +263,18 @@ def receive_session_file(message):
 
 
 def parser_step_sources(message):
+	if _is_cancel(message.text):
+		bot.send_message(message.chat.id, 'Отменено.', reply_markup=build_new_menu())
+		return
 	USER_STATE[message.chat.id] = {'flow': 'parser', 'sources': message.text}
 	msg = bot.send_message(message.chat.id, 'Введите posts-limit (пример: 100):')
 	bot.register_next_step_handler(msg, parser_step_posts)
 
 
 def parser_step_posts(message):
+	if _is_cancel(message.text):
+		bot.send_message(message.chat.id, 'Отменено.', reply_markup=build_new_menu())
+		return
 	state = USER_STATE.get(message.chat.id, {})
 	try:
 		state['posts_limit'] = int(message.text.strip())
@@ -226,12 +286,18 @@ def parser_step_posts(message):
 
 
 def parser_step_comments(message):
+	if _is_cancel(message.text):
+		bot.send_message(message.chat.id, 'Отменено.', reply_markup=build_new_menu())
+		return
 	state = USER_STATE.get(message.chat.id, {})
 	try:
 		comments_limit = int(message.text.strip())
 	except (TypeError, ValueError):
 		comments_limit = 200
 	file_name, sources_count = _save_targets_file(message.chat.id, state.get('sources', ''), 'parser_sources')
+	if sources_count == 0:
+		bot.send_message(message.chat.id, 'Не найдено источников. Запустите заново.', reply_markup=build_new_menu())
+		return
 	command = [
 		sys.executable, 'parser.py',
 		'--targets-file', file_name,
@@ -244,20 +310,33 @@ def parser_step_comments(message):
 
 
 def inviter_step_sources(message):
+	if _is_cancel(message.text):
+		bot.send_message(message.chat.id, 'Отменено.', reply_markup=build_new_menu())
+		return
 	USER_STATE[message.chat.id] = {'flow': 'inviter', 'sources': message.text}
 	msg = bot.send_message(message.chat.id, 'Введите @username целевого чата/канала для инвайта:')
 	bot.register_next_step_handler(msg, inviter_step_target)
 
 
 def inviter_step_target(message):
+	if _is_cancel(message.text):
+		bot.send_message(message.chat.id, 'Отменено.', reply_markup=build_new_menu())
+		return
 	state = USER_STATE.get(message.chat.id, {})
-	state['invite_target'] = message.text.strip()
+	target = message.text.strip()
+	if target == '':
+		bot.send_message(message.chat.id, 'Цель инвайта пустая, попробуйте снова.')
+		return
+	state['invite_target'] = target
 	USER_STATE[message.chat.id] = state
 	msg = bot.send_message(message.chat.id, 'Введите лимит пользователей за запуск (пример: 100):')
 	bot.register_next_step_handler(msg, inviter_step_limit)
 
 
 def inviter_step_limit(message):
+	if _is_cancel(message.text):
+		bot.send_message(message.chat.id, 'Отменено.', reply_markup=build_new_menu())
+		return
 	state = USER_STATE.get(message.chat.id, {})
 	try:
 		state['limit'] = int(message.text.strip())
@@ -269,12 +348,18 @@ def inviter_step_limit(message):
 
 
 def inviter_step_sleep(message):
+	if _is_cancel(message.text):
+		bot.send_message(message.chat.id, 'Отменено.', reply_markup=build_new_menu())
+		return
 	state = USER_STATE.get(message.chat.id, {})
 	try:
 		sleep_sec = int(message.text.strip())
 	except (TypeError, ValueError):
 		sleep_sec = 15
 	file_name, sources_count = _save_targets_file(message.chat.id, state.get('sources', ''), 'inviter_sources')
+	if sources_count == 0:
+		bot.send_message(message.chat.id, 'Не найдено источников. Запустите заново.', reply_markup=build_new_menu())
+		return
 	command = [
 		sys.executable, 'inviter.py',
 		'--sources-file', file_name,
@@ -290,12 +375,50 @@ def inviter_step_sleep(message):
 
 @bot.callback_query_handler(func=lambda call:True)
 def podcategors(call):
+	if call.data == 'main_menu':
+		bot.send_message(call.message.chat.id, '◾️ Основное меню:', reply_markup=build_new_menu())
+		return
+
 	if call.data == 'accounts_menu':
 		sessions = list_sessions()
 		bot.send_message(
 			call.message.chat.id,
-			f'Аккаунтов загружено: {len(sessions)}\nПришлите .session файлы сюда документом.'
+			f'Аккаунтов загружено: {len(sessions)}\nПришлите .session файлы сюда документом.',
+			reply_markup=_build_accounts_menu()
 		)
+		return
+
+	if call.data == 'accounts_list':
+		sessions = list_sessions()
+		if len(sessions) == 0:
+			bot.send_message(call.message.chat.id, 'Аккаунты не добавлены.')
+			return
+		text = '📄 Аккаунты:\n' + '\n'.join([f'{idx + 1}. {s}' for idx, s in enumerate(sessions)])
+		bot.send_message(call.message.chat.id, text)
+		return
+
+	if call.data == 'accounts_delete_menu':
+		sessions = list_sessions()
+		if len(sessions) == 0:
+			bot.send_message(call.message.chat.id, 'Удалять нечего: аккаунтов нет.')
+			return
+		keyboard = types.InlineKeyboardMarkup()
+		for s in sessions[:20]:
+			keyboard.add(types.InlineKeyboardButton(text=f'🗑 {s}', callback_data=f'del_session|{s}'))
+		keyboard.add(types.InlineKeyboardButton(text='⬅️ Назад', callback_data='accounts_menu'))
+		bot.send_message(call.message.chat.id, 'Выберите аккаунт для удаления:', reply_markup=keyboard)
+		return
+
+	if call.data.startswith('del_session|'):
+		filename = call.data.split('|', 1)[1]
+		try:
+			if os.path.exists(filename):
+				os.remove(filename)
+				bot.send_message(call.message.chat.id, f'Удален аккаунт: {filename}')
+			else:
+				bot.send_message(call.message.chat.id, 'Файл уже отсутствует.')
+		except Exception as e:
+			bot.send_message(call.message.chat.id, f'Ошибка удаления: {e}')
 		return
 
 	if call.data == 'parser_start':
@@ -329,10 +452,65 @@ def podcategors(call):
 		bot.send_message(call.message.chat.id, '\n'.join(lines))
 		return
 
+	if call.data == 'manage_menu':
+		bot.send_message(call.message.chat.id, '⚙️ Управление задачами:', reply_markup=_build_manage_menu())
+		return
+
+	if call.data == 'task_stop_menu':
+		items = RUNNING_TASKS.get(call.message.chat.id, [])
+		running = [i for i in items if i.get('status') == 'running' and i.get('pid')]
+		if len(running) == 0:
+			bot.send_message(call.message.chat.id, 'Сейчас нет запущенных задач.')
+			return
+		keyboard = types.InlineKeyboardMarkup()
+		for idx, item in enumerate(items):
+			if item.get('status') == 'running' and item.get('pid'):
+				keyboard.add(types.InlineKeyboardButton(text=f'🛑 {item["title"]} (PID {item["pid"]})', callback_data=f'task_stop|{idx}'))
+		keyboard.add(types.InlineKeyboardButton(text='⬅️ Назад', callback_data='manage_menu'))
+		bot.send_message(call.message.chat.id, 'Выберите задачу для остановки:', reply_markup=keyboard)
+		return
+
+	if call.data.startswith('task_stop|'):
+		try:
+			idx = int(call.data.split('|', 1)[1])
+		except Exception:
+			bot.send_message(call.message.chat.id, 'Некорректный индекс задачи.')
+			return
+		items = RUNNING_TASKS.get(call.message.chat.id, [])
+		if idx < 0 or idx >= len(items):
+			bot.send_message(call.message.chat.id, 'Задача не найдена.')
+			return
+		item = items[idx]
+		pid = item.get('pid')
+		proc = item.get('proc')
+		if not pid:
+			bot.send_message(call.message.chat.id, 'Эта задача не запущена.')
+			return
+		try:
+			if proc and proc.poll() is None:
+				proc.terminate()
+			item['status'] = 'stopped'
+			bot.send_message(call.message.chat.id, f'Задача остановлена: {item["title"]}')
+		except Exception as e:
+			bot.send_message(call.message.chat.id, f'Ошибка остановки: {e}')
+		return
+
+	if call.data == 'task_clear_done':
+		items = RUNNING_TASKS.get(call.message.chat.id, [])
+		left = [i for i in items if i.get('status') in ['queued', 'running']]
+		removed = len(items) - len(left)
+		RUNNING_TASKS[call.message.chat.id] = left
+		bot.send_message(call.message.chat.id, f'Очищено завершенных задач: {removed}')
+		return
+
+	if call.data == 'stats_overview':
+		bot.send_message(call.message.chat.id, _stats_text())
+		return
+
 	if call.data == 'help_new':
 		bot.send_message(
 			call.message.chat.id,
-			'Как пользоваться:\n1) Загрузите .session аккаунты.\n2) Нажмите "Парсинг" и укажите источники.\n3) Нажмите "Инвайт", укажите источники и цель.\nЗадачи идут через очередь, а инвайт ограничен антифлуд-лимитами.'
+			'Как пользоваться:\n1) Загрузите .session аккаунты.\n2) "Парсинг" — источники + лимиты.\n3) "Инвайт" — источники + цель.\n4) "Управление" — стоп/очистка задач.\n5) "Аналитика" — результаты.\nНа шаге ввода можно написать: Отмена.'
 		)
 		return
 #	if call.data == 'Multi':
