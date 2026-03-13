@@ -2,9 +2,11 @@ from glob import glob
 from config import *
 import os
 import json
+import sqlite3
 import python_socks
 from telethon import TelegramClient
 from telethon.sessions import StringSession
+from telethon.crypto import AuthKey
 
 
 def get_chats():
@@ -70,8 +72,69 @@ def get_sessions():
     return sessions
 
 
+def _dc_endpoint(dc_id):
+    mapping = {
+        1: ('149.154.175.53', 443),
+        2: ('149.154.167.51', 443),
+        3: ('149.154.175.100', 443),
+        4: ('149.154.167.91', 443),
+        5: ('149.154.171.5', 443),
+    }
+    return mapping.get(int(dc_id or 2), ('149.154.167.51', 443))
+
+
+def _read_pyrogram_sqlite_session(path):
+    try:
+        conn = sqlite3.connect(path)
+        cur = conn.cursor()
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        tables = {r[0] for r in cur.fetchall()}
+        if 'sessions' not in tables or 'entities' in tables:
+            conn.close()
+            return None
+        cur.execute('PRAGMA table_info(sessions)')
+        cols = [r[1] for r in cur.fetchall()]
+        if 'dc_id' not in cols or 'auth_key' not in cols:
+            conn.close()
+            return None
+        cur.execute('SELECT dc_id, auth_key FROM sessions LIMIT 1')
+        row = cur.fetchone()
+        conn.close()
+        if not row:
+            return None
+        dc_id, auth_key = row[0], row[1]
+        if auth_key is None:
+            return None
+        if not isinstance(auth_key, (bytes, bytearray)):
+            try:
+                auth_key = bytes(auth_key)
+            except Exception:
+                return None
+        if len(auth_key) < 32:
+            return None
+        return int(dc_id), bytes(auth_key)
+    except Exception:
+        return None
+
+
+def _telethon_string_from_pyrogram(path):
+    data = _read_pyrogram_sqlite_session(path)
+    if not data:
+        return ''
+    dc_id, auth_key = data
+    host, port = _dc_endpoint(dc_id)
+    sess = StringSession()
+    sess.set_dc(dc_id, host, port)
+    sess.auth_key = AuthKey(data=auth_key)
+    return sess.save()
+
+
 def build_telegram_client(session_ref, api_id, api_hash, proxy=None):
     ref = str(session_ref or '').strip()
+    if ref.lower().endswith('.session'):
+        converted = _telethon_string_from_pyrogram(ref)
+        if converted:
+            return TelegramClient(StringSession(converted), api_id, api_hash, proxy=proxy)
     if ref.lower().endswith('.json'):
         with open(ref, 'r', encoding='utf-8') as f:
             raw = f.read().strip()
