@@ -161,7 +161,8 @@ def _start_progress_monitor(item):
 						progress = json.load(f)
 					text = _format_progress_text(item, progress)
 					if text != last_snapshot:
-						bot.send_message(item['user_id'], text)
+						msg_id = item.get('progress_msg_id')
+						item['progress_msg_id'] = _render_inline(item['user_id'], msg_id, text, parse_mode=None)
 						last_snapshot = text
 			except Exception:
 				pass
@@ -184,7 +185,8 @@ def _queue_worker():
 		item['pid'] = proc.pid
 		item['proc'] = proc
 		try:
-			bot.send_message(item['user_id'], f'▶️ Запущено: {item["title"]} (PID {proc.pid})')
+			msg = bot.send_message(item['user_id'], f'▶️ Запущено: {item["title"]} (PID {proc.pid})')
+			item['progress_msg_id'] = msg.message_id
 		except Exception:
 			pass
 		_start_progress_monitor(item)
@@ -192,7 +194,8 @@ def _queue_worker():
 		with TASK_LOCK:
 			item['status'] = f'finished ({code})'
 		try:
-			bot.send_message(item['user_id'], f'✅ Завершено: {item["title"]} (code {code})')
+			msg_id = item.get('progress_msg_id')
+			_render_inline(item['user_id'], msg_id, f'✅ Завершено: {item["title"]}\nКод: {code}', parse_mode=None)
 		except Exception:
 			pass
 		TASK_QUEUE.task_done()
@@ -216,6 +219,7 @@ def _enqueue_process(user_id, title, command, progress_file=''):
 		'pid': None,
 		'proc': None,
 		'progress_file': progress_file,
+		'progress_msg_id': None,
 	}
 	with TASK_LOCK:
 		RUNNING_TASKS.setdefault(user_id, []).append(item)
@@ -245,6 +249,50 @@ def _is_admin(user_id):
 
 def _deny_access(chat_id):
 	bot.send_message(chat_id, '⛔ Доступ закрыт. Этим ботом может пользоваться только администратор.')
+
+
+def _render_inline(chat_id, message_id, text, reply_markup=None, parse_mode='HTML'):
+	try:
+		bot.edit_message_text(
+			chat_id=chat_id,
+			message_id=message_id,
+			text=text,
+			reply_markup=reply_markup,
+			parse_mode=parse_mode
+		)
+		return message_id
+	except Exception:
+		msg = bot.send_message(chat_id, text, reply_markup=reply_markup, parse_mode=parse_mode)
+		return msg.message_id
+
+
+def _guide_text():
+	return (
+		'📘 <b>Гайд по функциям Teddy Invite Pro</b>\n\n'
+		'🧩 <b>Аккаунты • Session</b>\n'
+		'• Загружай .session как документ.\n'
+		'• Смотри список аккаунтов и удаляй ненужные.\n\n'
+		'🔎 <b>Парсинг • Аудитория</b>\n'
+		'• Сбор пользователей из участников и комментариев.\n'
+		'• Работает по одному или нескольким источникам.\n'
+		'• Прогресс показывается в live-режиме без спама.\n\n'
+		'📨 <b>Инвайт • Добавление</b>\n'
+		'• Добавляет пользователей из базы парсинга.\n'
+		'• Учитывает ограничения (privacy/flood/already).\n'
+		'• Показывает live-отчет: сколько обработано и добавлено.\n\n'
+		'🛠 <b>Настройки • Парсинг/Инвайт</b>\n'
+		'• Тонкая настройка лимитов и пауз.\n'
+		'• Пресеты: Мягкий / Стандарт / Агрессивный.\n'
+		'• Все значения сохраняются в базе.\n\n'
+		'⚙️ <b>Управление • Процессы</b>\n'
+		'• Остановить задачу.\n'
+		'• Очистить завершенные задачи.\n\n'
+		'📊 <b>Статус • Live</b>\n'
+		'• Очередь, PID, и текущий прогресс задач.\n\n'
+		'📈 <b>Аналитика • Отчёты</b>\n'
+		'• Сводка по парсингу и результатам инвайта.\n\n'
+		'💡 <b>Подсказка:</b> на любом шаге нажми «❌ Отменить сценарий» или «⬅️ Назад в меню».'
+	)
 
 
 def _get_setting(key):
@@ -695,22 +743,27 @@ def podcategors(call):
 
 	if call.data == 'cancel_flow':
 		USER_STATE.pop(call.message.chat.id, None)
-		bot.send_message(call.message.chat.id, '❌ Текущий сценарий отменен.', reply_markup=build_new_menu())
+		_render_inline(call.message.chat.id, call.message.message_id, '❌ Текущий сценарий отменен.', reply_markup=build_new_menu(), parse_mode=None)
 		return
 
 	if call.data == 'main_menu':
-		bot.send_message(call.message.chat.id, '✨ Главное меню:', reply_markup=build_new_menu())
+		_render_inline(call.message.chat.id, call.message.message_id, '✨ Главное меню:', reply_markup=build_new_menu(), parse_mode=None)
 		return
 
 	if call.data == 'settings_menu':
-		bot.send_message(call.message.chat.id, _settings_text(), parse_mode='HTML', reply_markup=_build_settings_menu())
+		_render_inline(call.message.chat.id, call.message.message_id, _settings_text(), parse_mode='HTML', reply_markup=_build_settings_menu())
 		return
 
 	if call.data == 'settings_reset':
 		for k, v in DEFAULT_APP_SETTINGS.items():
 			_set_setting(k, v)
-		bot.send_message(call.message.chat.id, '♻️ Настройки сброшены к значениям по умолчанию.', reply_markup=_build_settings_menu())
-		bot.send_message(call.message.chat.id, _settings_text(), parse_mode='HTML', reply_markup=_build_settings_menu())
+		_render_inline(
+			call.message.chat.id,
+			call.message.message_id,
+			'♻️ Настройки сброшены к значениям по умолчанию.\n\n' + _settings_text(),
+			parse_mode='HTML',
+			reply_markup=_build_settings_menu()
+		)
 		return
 
 	if call.data.startswith('settings_preset|'):
@@ -718,21 +771,26 @@ def podcategors(call):
 		if not _apply_preset(name):
 			bot.send_message(call.message.chat.id, 'Неизвестный пресет.')
 			return
-		bot.send_message(
+		_render_inline(
 			call.message.chat.id,
-			f'🚀 Применен пресет: <b>{_preset_title(name)}</b>\n'
-			'Лимиты и паузы обновлены.',
+			call.message.message_id,
+			f'🚀 Применен пресет: <b>{_preset_title(name)}</b>\nЛимиты и паузы обновлены.\n\n' + _settings_text(),
 			parse_mode='HTML',
 			reply_markup=_build_settings_menu()
 		)
-		bot.send_message(call.message.chat.id, _settings_text(), parse_mode='HTML', reply_markup=_build_settings_menu())
 		return
 
 	if call.data.startswith('settings_toggle|'):
 		key = call.data.split('|', 1)[1]
 		cur = _setting_bool(key)
 		_set_setting(key, '0' if cur else '1')
-		bot.send_message(call.message.chat.id, f'✅ {_setting_title(key)}: {"ВЫКЛ" if cur else "ВКЛ"}', reply_markup=_build_settings_menu())
+		_render_inline(
+			call.message.chat.id,
+			call.message.message_id,
+			f'✅ {_setting_title(key)}: {"ВЫКЛ" if cur else "ВКЛ"}\n\n' + _settings_text(),
+			parse_mode='HTML',
+			reply_markup=_build_settings_menu()
+		)
 		return
 
 	if call.data.startswith('settings_edit|'):
@@ -749,10 +807,12 @@ def podcategors(call):
 
 	if call.data == 'accounts_menu':
 		sessions = list_sessions()
-		bot.send_message(
+		_render_inline(
 			call.message.chat.id,
+			call.message.message_id,
 			f'📂 Управление аккаунтами\nЗагружено аккаунтов: {len(sessions)}\n\nОтправь .session файл документом, чтобы добавить аккаунт.',
-			reply_markup=_build_accounts_menu()
+			reply_markup=_build_accounts_menu(),
+			parse_mode=None
 		)
 		return
 
@@ -837,11 +897,11 @@ def podcategors(call):
 					extra = ''
 			lines.append(f'{idx}. {item["title"]} - {status} - {pid_text}{extra}')
 		lines.append(f'Очередь (глобально): {TASK_QUEUE.qsize()}')
-		bot.send_message(call.message.chat.id, '📊 Статус задач:\n' + '\n'.join(lines))
+		_render_inline(call.message.chat.id, call.message.message_id, '📊 Статус задач:\n' + '\n'.join(lines), reply_markup=build_new_menu(), parse_mode=None)
 		return
 
 	if call.data == 'manage_menu':
-		bot.send_message(call.message.chat.id, '⚙️ Управление задачами:', reply_markup=_build_manage_menu())
+		_render_inline(call.message.chat.id, call.message.message_id, '⚙️ Управление задачами:', reply_markup=_build_manage_menu(), parse_mode=None)
 		return
 
 	if call.data == 'task_stop_menu':
@@ -892,14 +952,11 @@ def podcategors(call):
 		return
 
 	if call.data == 'stats_overview':
-		bot.send_message(call.message.chat.id, _stats_text())
+		_render_inline(call.message.chat.id, call.message.message_id, _stats_text(), reply_markup=build_new_menu(), parse_mode=None)
 		return
 
 	if call.data == 'help_new':
-		bot.send_message(
-			call.message.chat.id,
-			'🤝 Как пользоваться:\n1) Добавь .session аккаунты в разделе «Аккаунты».\n2) Запусти «Парсинг» и укажи источники.\n3) Запусти «Инвайт» и укажи цель.\n4) В «Управление» можно остановить задачу и очистить список.\n5) В «Аналитика» видно результаты.\n\nВо время выполнения бот отправляет живые апдейты прогресса.\nНа любом шаге нажми «❌ Отмена» или «🎛 Меню».'
-		)
+		_render_inline(call.message.chat.id, call.message.message_id, _guide_text(), reply_markup=build_new_menu(), parse_mode='HTML')
 		return
 #	if call.data == 'Multi':
 #			bot.delete_message(chat_id=call.message.chat.id,message_id=call.message.message_id)
