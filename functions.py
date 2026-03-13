@@ -81,13 +81,36 @@ def build_telegram_client(session_ref, api_id, api_hash, proxy=None):
         except Exception:
             data = None
         if isinstance(data, dict):
-            value = str(data.get('session') or data.get('string_session') or data.get('string') or '').strip()
+            keys = [
+                'session', 'string_session', 'session_string', 'string',
+                'telethon_session', 'telethonStringSession', 'stringSession'
+            ]
+            value = ''
+            for k in keys:
+                v = data.get(k)
+                if isinstance(v, str) and v.strip():
+                    value = v.strip()
+                    break
+            if not value:
+                for nk in ['data', 'account', 'telegram', 'client', 'session_data']:
+                    nested = data.get(nk)
+                    if isinstance(nested, dict):
+                        for k in keys:
+                            v = nested.get(k)
+                            if isinstance(v, str) and v.strip():
+                                value = v.strip()
+                                break
+                    if value:
+                        break
         elif isinstance(data, str):
             value = data.strip()
         else:
             value = raw
         if not value:
-            raise RuntimeError(f'Пустой StringSession в файле {ref}')
+            raise RuntimeError(
+                f'JSON не содержит StringSession: {ref}. '
+                f'Ожидаются поля session/string_session/session_string или строка StringSession целиком.'
+            )
         return TelegramClient(StringSession(value), api_id, api_hash, proxy=proxy)
     return TelegramClient(ref, api_id, api_hash, proxy=proxy)
 

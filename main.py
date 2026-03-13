@@ -233,6 +233,8 @@ async def _probe_spam_block(client):
 def _detect_health_status_by_error(exc):
 	name = exc.__class__.__name__
 	text = _health_details_ru(f'{name}: {exc}')
+	if 'JSON не содержит StringSession' in text:
+		return 'dead', text
 	dead_errors = {
 		'AuthKeyUnregisteredError',
 		'SessionRevokedError',
