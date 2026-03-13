@@ -622,6 +622,21 @@ def _render_inline(chat_id, message_id, text, reply_markup=None, parse_mode='HTM
 		return msg.message_id
 
 
+def _send_html_chunks(chat_id, header, lines, chunk_size=3500):
+	base = str(header or '')
+	items = list(lines or [])
+	current = base
+	for line in items:
+		add = ('\n' if current else '') + line
+		if len(current) + len(add) > chunk_size:
+			bot.send_message(chat_id, current, parse_mode='HTML')
+			current = base + '\n' + line if base else line
+		else:
+			current += add
+	if current.strip():
+		bot.send_message(chat_id, current, parse_mode='HTML')
+
+
 def _guide_text():
 	return (
 		'📘 <b>Гайд по функциям Teddy Invite Pro</b>\n\n'
@@ -1336,7 +1351,7 @@ def podcategors(call):
 			rem = get_account_warmup_remaining(s)
 			if rem > 0:
 				lines.append(f'   🕒 Прогрев: <b>{_fmt_seconds_ru(rem)}</b>')
-		bot.send_message(call.message.chat.id, '📄 <b>Список аккаунтов</b>\n\n' + '\n'.join(lines), parse_mode='HTML')
+		_send_html_chunks(call.message.chat.id, '📄 <b>Список аккаунтов</b>\n', lines)
 		return
 
 	if call.data == 'accounts_check_all':
@@ -1351,7 +1366,7 @@ def podcategors(call):
 			prev = set_account_health(s, status, details)
 			_notify_health_change_if_needed(s, prev, status, details)
 			lines.append(f'{_account_status_emoji(status)} <code>{s}</code> — <b>{_account_status_title(status)}</b>')
-		bot.send_message(call.message.chat.id, '✅ Проверка завершена\n\n' + '\n'.join(lines), parse_mode='HTML')
+		_send_html_chunks(call.message.chat.id, '✅ Проверка завершена\n', lines)
 		return
 
 	if call.data == 'accounts_delete_menu':
