@@ -125,9 +125,45 @@ def _account_status_emoji(status):
 	}.get(status, '⚪')
 
 
+def _account_status_title(status):
+	return {
+		'active': 'АКТИВЕН',
+		'limited': 'ОГРАНИЧЕН',
+		'dead': 'НЕРАБОЧИЙ',
+		'unknown': 'НЕИЗВЕСТНО',
+	}.get(status, 'НЕИЗВЕСТНО')
+
+
+def _health_details_ru(details):
+	text = str(details or '').strip()
+	if text == '':
+		return '-'
+	if 'Session not authorized' in text:
+		return 'Сессия не авторизована'
+	if 'TG_API_ID/TG_API_HASH not configured' in text:
+		return 'Не настроены API ID / API HASH'
+	if 'Authorization ok' in text:
+		return 'Авторизация успешна'
+	if 'Cannot get entity from a channel' in text:
+		return 'Нет доступа к тестовому чату: аккаунт не состоит в нём'
+	if 'PeerFloodError' in text:
+		return 'Спам-ограничение Telegram (PeerFlood)'
+	if 'FloodWaitError' in text:
+		return text.replace('FloodWaitError', 'Ожидание из-за лимитов')
+	if 'AuthKeyUnregisteredError' in text:
+		return 'Сессия недействительна (ключ авторизации удалён)'
+	if 'SessionRevokedError' in text:
+		return 'Сессия отозвана в Telegram'
+	if 'UserDeactivatedError' in text or 'UserDeactivatedBanError' in text:
+		return 'Аккаунт деактивирован или заблокирован'
+	if 'PhoneNumberBannedError' in text:
+		return 'Номер аккаунта заблокирован Telegram'
+	return text
+
+
 def _detect_health_status_by_error(exc):
 	name = exc.__class__.__name__
-	text = f'{name}: {exc}'
+	text = _health_details_ru(f'{name}: {exc}')
 	dead_errors = {
 		'AuthKeyUnregisteredError',
 		'SessionRevokedError',
@@ -153,13 +189,13 @@ def _check_account_health(session):
 			client = TelegramClient(session, config.API_ID, config.API_HASH, proxy=get_proxy())
 			await client.connect()
 			if not await client.is_user_authorized():
-				return 'dead', 'Session not authorized'
+				return 'dead', 'Сессия не авторизована'
 			me = await client.get_me()
 			if config.account_check_chat:
 				await client.get_entity(config.account_check_chat)
 			user_label = f'@{me.username}' if getattr(me, 'username', None) else f'id={getattr(me, "id", "n/a")}'
 			extra = f' | test={config.account_check_chat}' if config.account_check_chat else ''
-			return 'active', f'{user_label}{extra}'
+			return 'active', f'Авторизация успешна: {user_label}{extra}'
 		except Exception as e:
 			return _detect_health_status_by_error(e)
 		finally:
@@ -170,7 +206,7 @@ def _check_account_health(session):
 					pass
 
 	if not config.API_ID or not config.API_HASH:
-		return 'limited', 'TG_API_ID/TG_API_HASH not configured'
+		return 'limited', 'Не настроены API ID / API HASH'
 	return asyncio.run(_run())
 
 
@@ -184,8 +220,8 @@ def _notify_health_change_if_needed(session, prev_status, new_status, details):
 	text = (
 		f'🔔 <b>Статус аккаунта изменился</b>\n'
 		f'• Аккаунт: <code>{session}</code>\n'
-		f'• Статус: {_account_status_emoji(new_status)} <b>{new_status.upper()}</b>\n'
-		f'• Детали: <code>{details[:500] if details else "-"}</code>'
+		f'• Статус: {_account_status_emoji(new_status)} <b>{_account_status_title(new_status)}</b>\n'
+		f'• Детали: <code>{_health_details_ru(details)[:500]}</code>'
 	)
 	try:
 		bot.send_message(admin, text, parse_mode='HTML')
@@ -760,8 +796,8 @@ def receive_session_file(message):
 	bot.send_message(
 		message.chat.id,
 		f'✅ Аккаунт добавлен: <code>{filename}</code>\n'
-		f'Статус: {_account_status_emoji(status)} <b>{status.upper()}</b>\n'
-		f'Детали: <code>{details[:300] if details else "-"}</code>\n'
+		f'Статус: {_account_status_emoji(status)} <b>{_account_status_title(status)}</b>\n'
+		f'Детали: <code>{_health_details_ru(details)[:300]}</code>\n'
 		f'Всего аккаунтов: <b>{len(list_sessions())}</b>',
 		parse_mode='HTML'
 	)
@@ -1114,9 +1150,9 @@ def podcategors(call):
 		lines = []
 		for idx, s in enumerate(sessions, start=1):
 			status, details, _ = get_account_health(s)
-			lines.append(f'{idx}. {_account_status_emoji(status)} <code>{s}</code> — <b>{status.upper()}</b>')
+			lines.append(f'{idx}. {_account_status_emoji(status)} <code>{s}</code> — <b>{_account_status_title(status)}</b>')
 			if details:
-				lines.append(f'   <code>{details[:120]}</code>')
+				lines.append(f'   <code>{_health_details_ru(details)[:120]}</code>')
 		bot.send_message(call.message.chat.id, '📄 <b>Список аккаунтов</b>\n\n' + '\n'.join(lines), parse_mode='HTML')
 		return
 
@@ -1131,7 +1167,7 @@ def podcategors(call):
 			status, details = _check_account_health(s)
 			prev = set_account_health(s, status, details)
 			_notify_health_change_if_needed(s, prev, status, details)
-			lines.append(f'{_account_status_emoji(status)} <code>{s}</code> — <b>{status.upper()}</b>')
+			lines.append(f'{_account_status_emoji(status)} <code>{s}</code> — <b>{_account_status_title(status)}</b>')
 		bot.send_message(call.message.chat.id, '✅ Проверка завершена\n\n' + '\n'.join(lines), parse_mode='HTML')
 		return
 

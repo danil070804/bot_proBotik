@@ -107,7 +107,7 @@ async def _get_or_create_client(session, clients, proxy, invite_target):
         return clients[session]
     client = TelegramClient(session, API_ID, API_HASH, proxy=proxy)
     await client.start()
-    set_account_health(session, 'active', 'Authorization ok')
+    set_account_health(session, 'active', 'Авторизация успешна')
     await ensure_join_target(client, invite_target)
     clients[session] = client
     return client
@@ -228,7 +228,7 @@ async def run_inviter(
                 progress['active_session'] = session
             except PeerFloodError:
                 set_account_cooldown(session, max_flood_wait * 2, 'peer-flood')
-                set_account_health(session, 'limited', 'PeerFloodError')
+                set_account_health(session, 'limited', 'Спам-ограничение Telegram (PeerFlood)')
                 mark_invite_result(source_row, invite_target, username, user_id, 'peer_flood', 'PeerFloodError')
                 stats['errors'] += 2
                 stats['extra_sleep'] += 4
@@ -239,7 +239,7 @@ async def run_inviter(
             except FloodWaitError as e:
                 wait_s = int(e.seconds)
                 set_account_cooldown(session, wait_s, 'flood-wait')
-                set_account_health(session, 'limited', f'FloodWaitError: {wait_s}s')
+                set_account_health(session, 'limited', f'Ожидание из-за лимитов: {wait_s} сек')
                 mark_invite_result(source_row, invite_target, username, user_id, 'flood_wait', str(wait_s))
                 stats['errors'] += 1
                 stats['extra_sleep'] += 2
@@ -252,9 +252,9 @@ async def run_inviter(
             except Exception as e:
                 err_name = e.__class__.__name__
                 if err_name in {'AuthKeyUnregisteredError', 'SessionRevokedError', 'UserDeactivatedError', 'UserDeactivatedBanError', 'PhoneNumberBannedError'}:
-                    set_account_health(session, 'dead', f'{err_name}: {e}')
+                    set_account_health(session, 'dead', 'Сессия/аккаунт недействительны или заблокированы')
                 else:
-                    set_account_health(session, 'limited', f'{err_name}: {e}')
+                    set_account_health(session, 'limited', f'Ошибка работы аккаунта: {err_name}')
                 mark_invite_result(source_row, invite_target, username, user_id, 'error', str(e))
                 stats['errors'] += 1
                 stats['extra_sleep'] += 1
