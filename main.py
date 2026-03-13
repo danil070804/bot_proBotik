@@ -22,7 +22,11 @@ import hashlib
 import config
 from getpass import getpass
 import pytz
-from db import get_main_connection, init_db, get_app_setting, set_app_setting
+from db import (
+	get_main_connection, init_db, get_app_setting, set_app_setting,
+	add_source_filter, remove_source_filter, get_source_filters,
+	add_user_filter, remove_user_filter, get_user_filters
+)
 
 from pyqiwip2p import QiwiP2P
 from pyqiwip2p.p2p_types import QiwiCustomer, QiwiDatetime
@@ -98,6 +102,7 @@ def build_new_menu():
 		types.InlineKeyboardButton(text='⚙️ Управление • Процессы', callback_data='manage_menu'),
 		types.InlineKeyboardButton(text='📈 Аналитика • Отчёты', callback_data='stats_overview'),
 	)
+	keyboard.add(types.InlineKeyboardButton(text='🛡 Фильтры • White/Black', callback_data='filters_menu'))
 	keyboard.add(types.InlineKeyboardButton(text='🛠 Настройки • Парсинг/Инвайт', callback_data='settings_menu'))
 	keyboard.add(types.InlineKeyboardButton(text='ℹ️ Помощь • Гайд', callback_data='help_new'))
 	return keyboard
@@ -139,11 +144,13 @@ def _format_progress_text(item, progress):
 		return (
 			f'📨 Инвайт в процессе\n'
 			f'Цель: {progress.get("invite_target", "-")}\n'
+			f'Аккаунт: {progress.get("active_session", "-")}\n'
 			f'Источники: {progress.get("sources_done", 0)}/{progress.get("sources_total", 0)}\n'
 			f'Кандидатов: {progress.get("total_candidates", 0)}\n'
 			f'Обработано: {progress.get("processed", 0)}\n'
 			f'✅ Добавлено: {progress.get("invited", 0)} | ⛔ privacy: {progress.get("privacy", 0)}\n'
-			f'⚠️ already: {progress.get("already", 0)} | errors: {progress.get("error", 0)}'
+			f'⚠️ already: {progress.get("already", 0)} | errors: {progress.get("error", 0)}\n'
+			f'🛡 фильтр источников: {progress.get("filtered_sources", 0)} | фильтр users: {progress.get("filtered_users", 0)}'
 		)
 	return f'Задача: {item["title"]} выполняется...'
 
@@ -252,6 +259,45 @@ def _deny_access(chat_id):
 	bot.send_message(chat_id, '⛔ Доступ закрыт. Этим ботом может пользоваться только администратор.')
 
 
+def _handle_filter_command(message):
+	text = str(message.text or '').strip()
+	parts = text.split(maxsplit=1)
+	if len(parts) != 2:
+		return False
+	cmd = parts[0].lower()
+	value = parts[1].strip()
+	commands = {
+		'+srcwl': ('source', 'whitelist', 'add'),
+		'-srcwl': ('source', 'whitelist', 'remove'),
+		'+srcbl': ('source', 'blacklist', 'add'),
+		'-srcbl': ('source', 'blacklist', 'remove'),
+		'+usrwl': ('user', 'whitelist', 'add'),
+		'-usrwl': ('user', 'whitelist', 'remove'),
+		'+usrbl': ('user', 'blacklist', 'add'),
+		'-usrbl': ('user', 'blacklist', 'remove'),
+	}
+	if cmd not in commands:
+		return False
+	target_type, mode, action = commands[cmd]
+	if target_type == 'source':
+		if action == 'add':
+			add_source_filter(mode, value)
+		else:
+			remove_source_filter(mode, value)
+	else:
+		if action == 'add':
+			add_user_filter(mode, value)
+		else:
+			remove_user_filter(mode, value)
+	bot.send_message(
+		message.chat.id,
+		f'✅ Фильтр обновлен: <code>{cmd} {value}</code>\n\n' + _filters_text(),
+		parse_mode='HTML',
+		reply_markup=build_new_menu()
+	)
+	return True
+
+
 def _render_inline(chat_id, message_id, text, reply_markup=None, parse_mode='HTML'):
 	try:
 		bot.edit_message_text(
@@ -292,6 +338,9 @@ def _guide_text():
 		'• Очередь, PID, и текущий прогресс задач.\n\n'
 		'📈 <b>Аналитика • Отчёты</b>\n'
 		'• Сводка по парсингу и результатам инвайта.\n\n'
+		'🛡 <b>Фильтры • White/Black</b>\n'
+		'• Ограничивают источники и пользователей для безопасности.\n'
+		'• Работают и в парсинге, и в инвайте.\n\n'
 		'💡 <b>Подсказка:</b> на любом шаге нажми «❌ Отменить сценарий» или «⬅️ Назад в меню».'
 	)
 
@@ -311,6 +360,22 @@ def _has_active_flow(user_id):
 
 def _get_setting(key):
 	return get_app_setting(key, DEFAULT_APP_SETTINGS.get(key, ''))
+
+
+def _filters_text():
+	src_wl, src_bl = get_source_filters()
+	usr_wl, usr_bl = get_user_filters()
+	return (
+		'🛡 <b>Фильтры источников и пользователей</b>\n\n'
+		f'Источники • whitelist: <b>{len(src_wl)}</b> | blacklist: <b>{len(src_bl)}</b>\n'
+		f'Пользователи • whitelist: <b>{len(usr_wl)}</b> | blacklist: <b>{len(usr_bl)}</b>\n\n'
+		'Формат команд:\n'
+		'<code>+srcwl @chat</code> / <code>-srcwl @chat</code>\n'
+		'<code>+srcbl @chat</code> / <code>-srcbl @chat</code>\n'
+		'<code>+usrwl @username</code> / <code>-usrwl @username</code>\n'
+		'<code>+usrbl @username</code> / <code>-usrbl @username</code>\n\n'
+		'После изменения фильтры применяются сразу.'
+	)
 
 
 def _set_setting(key, value):
@@ -524,6 +589,11 @@ def send_text(message):
 
 		elif message.text.lower() == '🎛 меню':
 			bot.send_message(message.chat.id, '✨ Выберите действие:', parse_mode='HTML', reply_markup=build_new_menu())
+			return
+		elif message.text.lower() in ['фильтры', 'filters']:
+			bot.send_message(message.chat.id, _filters_text(), parse_mode='HTML', reply_markup=build_new_menu())
+			return
+		elif _handle_filter_command(message):
 			return
 
 
@@ -818,6 +888,10 @@ def podcategors(call):
 
 	if call.data == 'settings_menu':
 		_render_inline(call.message.chat.id, call.message.message_id, _settings_text(), parse_mode='HTML', reply_markup=_build_settings_menu())
+		return
+
+	if call.data == 'filters_menu':
+		_render_inline(call.message.chat.id, call.message.message_id, _filters_text(), parse_mode='HTML', reply_markup=build_new_menu())
 		return
 
 	if call.data == 'settings_reset':

@@ -8,7 +8,7 @@ from telethon.errors import FloodWaitError, UserAlreadyParticipantError
 from telethon.tl.functions.channels import JoinChannelRequest
 
 from config import API_ID, API_HASH
-from db import save_parsed_user, save_parsed_comment
+from db import save_parsed_user, save_parsed_comment, is_source_allowed
 from functions import get_sessions, get_proxy
 
 
@@ -49,7 +49,11 @@ def _read_targets(single_target, targets_file):
         if t and t not in seen:
             seen.add(t)
             uniq.append(t)
-    return uniq
+    allowed = []
+    for t in uniq:
+        if is_source_allowed(t):
+            allowed.append(t)
+    return allowed
 
 
 async def ensure_join(client, target):

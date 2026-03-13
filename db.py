@@ -64,6 +64,20 @@ def init_db():
                 'CREATE TABLE IF NOT EXISTS app_settings('
                 'key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TIMESTAMP DEFAULT NOW())'
             )
+            cursor.execute(
+                'CREATE TABLE IF NOT EXISTS source_filters('
+                'mode TEXT NOT NULL, source TEXT NOT NULL, created_at TIMESTAMP DEFAULT NOW(), '
+                'UNIQUE(mode, source))'
+            )
+            cursor.execute(
+                'CREATE TABLE IF NOT EXISTS user_filters('
+                'mode TEXT NOT NULL, username TEXT NOT NULL, created_at TIMESTAMP DEFAULT NOW(), '
+                'UNIQUE(mode, username))'
+            )
+            cursor.execute(
+                'CREATE TABLE IF NOT EXISTS account_cooldowns('
+                'session TEXT PRIMARY KEY, cooldown_until TIMESTAMP NOT NULL, reason TEXT, updated_at TIMESTAMP DEFAULT NOW())'
+            )
         else:
             cursor.execute('CREATE TABLE IF NOT EXISTS chats(acc TEXT, chat TEXT UNIQUE)')
             cursor.execute(
@@ -98,6 +112,18 @@ def init_db():
             cursor.execute(
                 'CREATE TABLE IF NOT EXISTS app_settings('
                 'key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT DEFAULT CURRENT_TIMESTAMP)'
+            )
+            cursor.execute(
+                'CREATE TABLE IF NOT EXISTS source_filters('
+                'mode TEXT, source TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP, UNIQUE(mode, source))'
+            )
+            cursor.execute(
+                'CREATE TABLE IF NOT EXISTS user_filters('
+                'mode TEXT, username TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP, UNIQUE(mode, username))'
+            )
+            cursor.execute(
+                'CREATE TABLE IF NOT EXISTS account_cooldowns('
+                'session TEXT PRIMARY KEY, cooldown_until INTEGER NOT NULL, reason TEXT, updated_at TEXT DEFAULT CURRENT_TIMESTAMP)'
             )
         conn.commit()
         cursor.close()
@@ -278,6 +304,179 @@ def set_app_setting(key, value):
         conn.commit()
         cursor.close()
 
+
+def _normalize_source(source):
+    return (source or '').strip().lower()
+
+
+def _normalize_username(username):
+    return (username or '').strip().lstrip('@').lower()
+
+
+def add_source_filter(mode, source):
+    mode = (mode or '').strip().lower()
+    source = _normalize_source(source)
+    if mode not in ('whitelist', 'blacklist') or not source:
+        return
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        if IS_POSTGRES:
+            cursor.execute(
+                'INSERT INTO source_filters(mode, source) VALUES (%s, %s) ON CONFLICT (mode, source) DO NOTHING',
+                (mode, source),
+            )
+        else:
+            cursor.execute('INSERT OR IGNORE INTO source_filters(mode, source) VALUES (?, ?)', (mode, source))
+        conn.commit()
+        cursor.close()
+
+
+def remove_source_filter(mode, source):
+    mode = (mode or '').strip().lower()
+    source = _normalize_source(source)
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        if IS_POSTGRES:
+            cursor.execute('DELETE FROM source_filters WHERE mode = %s AND source = %s', (mode, source))
+        else:
+            cursor.execute('DELETE FROM source_filters WHERE mode = ? AND source = ?', (mode, source))
+        conn.commit()
+        cursor.close()
+
+
+def get_source_filters():
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('SELECT mode, source FROM source_filters')
+        rows = cursor.fetchall()
+        cursor.close()
+    whitelist = set()
+    blacklist = set()
+    for mode, source in rows:
+        if mode == 'whitelist':
+            whitelist.add(source)
+        elif mode == 'blacklist':
+            blacklist.add(source)
+    return whitelist, blacklist
+
+
+def is_source_allowed(source):
+    source = _normalize_source(source)
+    wl, bl = get_source_filters()
+    if source in bl:
+        return False
+    if wl and source not in wl:
+        return False
+    return True
+
+
+def add_user_filter(mode, username):
+    mode = (mode or '').strip().lower()
+    username = _normalize_username(username)
+    if mode not in ('whitelist', 'blacklist') or not username:
+        return
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        if IS_POSTGRES:
+            cursor.execute(
+                'INSERT INTO user_filters(mode, username) VALUES (%s, %s) ON CONFLICT (mode, username) DO NOTHING',
+                (mode, username),
+            )
+        else:
+            cursor.execute('INSERT OR IGNORE INTO user_filters(mode, username) VALUES (?, ?)', (mode, username))
+        conn.commit()
+        cursor.close()
+
+
+def remove_user_filter(mode, username):
+    mode = (mode or '').strip().lower()
+    username = _normalize_username(username)
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        if IS_POSTGRES:
+            cursor.execute('DELETE FROM user_filters WHERE mode = %s AND username = %s', (mode, username))
+        else:
+            cursor.execute('DELETE FROM user_filters WHERE mode = ? AND username = ?', (mode, username))
+        conn.commit()
+        cursor.close()
+
+
+def get_user_filters():
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('SELECT mode, username FROM user_filters')
+        rows = cursor.fetchall()
+        cursor.close()
+    whitelist = set()
+    blacklist = set()
+    for mode, username in rows:
+        if mode == 'whitelist':
+            whitelist.add(username)
+        elif mode == 'blacklist':
+            blacklist.add(username)
+    return whitelist, blacklist
+
+
+def is_username_allowed(username):
+    username = _normalize_username(username)
+    if not username:
+        return False
+    wl, bl = get_user_filters()
+    if username in bl:
+        return False
+    if wl and username not in wl:
+        return False
+    return True
+
+
+def set_account_cooldown(session, seconds, reason=''):
+    try:
+        seconds = int(seconds)
+    except Exception:
+        seconds = 0
+    if seconds <= 0:
+        return
+    session = str(session)
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        if IS_POSTGRES:
+            cursor.execute(
+                'INSERT INTO account_cooldowns(session, cooldown_until, reason) '
+                'VALUES (%s, NOW() + (%s * INTERVAL \'1 second\'), %s) '
+                'ON CONFLICT (session) DO UPDATE SET '
+                'cooldown_until = EXCLUDED.cooldown_until, reason = EXCLUDED.reason, updated_at = NOW()',
+                (session, seconds, reason),
+            )
+        else:
+            import time as _time
+            until_ts = int(_time.time()) + seconds
+            cursor.execute(
+                'INSERT OR REPLACE INTO account_cooldowns(session, cooldown_until, reason) VALUES (?, ?, ?)',
+                (session, until_ts, reason),
+            )
+        conn.commit()
+        cursor.close()
+
+
+def get_account_cooldown_remaining(session):
+    session = str(session)
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        if IS_POSTGRES:
+            cursor.execute(
+                "SELECT GREATEST(0, EXTRACT(EPOCH FROM (cooldown_until - NOW())))::INT FROM account_cooldowns WHERE session = %s",
+                (session,),
+            )
+            row = cursor.fetchone()
+            remaining = int(row[0]) if row and row[0] is not None else 0
+        else:
+            import time as _time
+            cursor.execute('SELECT cooldown_until FROM account_cooldowns WHERE session = ?', (session,))
+            row = cursor.fetchone()
+            until_ts = int(row[0]) if row else 0
+            remaining = max(0, until_ts - int(_time.time()))
+        cursor.close()
+        return remaining
 
 init_db()
 
