@@ -12,6 +12,7 @@ import glob
 import threading
 from queue import Queue
 import json
+import asyncio
 import keyboards
 import requests
 from datetime import datetime, timedelta
@@ -25,8 +26,11 @@ import pytz
 from db import (
 	get_main_connection, init_db, get_app_setting, set_app_setting,
 	add_source_filter, remove_source_filter, get_source_filters,
-	add_user_filter, remove_user_filter, get_user_filters
+	add_user_filter, remove_user_filter, get_user_filters,
+	get_account_health, set_account_health
 )
+from telethon import TelegramClient
+from functions import get_proxy
 
 from pyqiwip2p import QiwiP2P
 from pyqiwip2p.p2p_types import QiwiCustomer, QiwiDatetime
@@ -110,6 +114,83 @@ def build_new_menu():
 
 def list_sessions():
 	return glob.glob('*.session')
+
+
+def _account_status_emoji(status):
+	return {
+		'active': '🟢',
+		'limited': '🟠',
+		'dead': '🔴',
+		'unknown': '⚪',
+	}.get(status, '⚪')
+
+
+def _detect_health_status_by_error(exc):
+	name = exc.__class__.__name__
+	text = f'{name}: {exc}'
+	dead_errors = {
+		'AuthKeyUnregisteredError',
+		'SessionRevokedError',
+		'UserDeactivatedError',
+		'UserDeactivatedBanError',
+		'PhoneNumberBannedError',
+	}
+	limited_errors = {
+		'PeerFloodError',
+		'FloodWaitError',
+	}
+	if name in dead_errors:
+		return 'dead', text
+	if name in limited_errors:
+		return 'limited', text
+	return 'limited', text
+
+
+def _check_account_health(session):
+	async def _run():
+		client = None
+		try:
+			client = TelegramClient(session, config.API_ID, config.API_HASH, proxy=get_proxy())
+			await client.connect()
+			if not await client.is_user_authorized():
+				return 'dead', 'Session not authorized'
+			me = await client.get_me()
+			if config.account_check_chat:
+				await client.get_entity(config.account_check_chat)
+			user_label = f'@{me.username}' if getattr(me, 'username', None) else f'id={getattr(me, "id", "n/a")}'
+			extra = f' | test={config.account_check_chat}' if config.account_check_chat else ''
+			return 'active', f'{user_label}{extra}'
+		except Exception as e:
+			return _detect_health_status_by_error(e)
+		finally:
+			if client:
+				try:
+					await client.disconnect()
+				except Exception:
+					pass
+
+	if not config.API_ID or not config.API_HASH:
+		return 'limited', 'TG_API_ID/TG_API_HASH not configured'
+	return asyncio.run(_run())
+
+
+def _notify_health_change_if_needed(session, prev_status, new_status, details):
+	if prev_status == new_status:
+		return
+	if new_status not in ('dead', 'limited', 'active'):
+		return
+	if not _is_admin(admin):
+		return
+	text = (
+		f'🔔 <b>Статус аккаунта изменился</b>\n'
+		f'• Аккаунт: <code>{session}</code>\n'
+		f'• Статус: {_account_status_emoji(new_status)} <b>{new_status.upper()}</b>\n'
+		f'• Детали: <code>{details[:500] if details else "-"}</code>'
+	)
+	try:
+		bot.send_message(admin, text, parse_mode='HTML')
+	except Exception:
+		pass
 
 
 def _save_targets_file(user_id, text_value, prefix):
@@ -217,6 +298,26 @@ def _ensure_worker():
 	_ensure_worker.started = True
 
 
+def _account_health_monitor():
+	while True:
+		try:
+			for session in list_sessions():
+				status, details = _check_account_health(session)
+				prev = set_account_health(session, status, details)
+				_notify_health_change_if_needed(session, prev, status, details)
+		except Exception:
+			pass
+		time.sleep(max(60, int(config.account_monitor_interval)))
+
+
+def _ensure_account_monitor():
+	if getattr(_ensure_account_monitor, 'started', False):
+		return
+	t = threading.Thread(target=_account_health_monitor, daemon=True)
+	t.start()
+	_ensure_account_monitor.started = True
+
+
 def _enqueue_process(user_id, title, command, progress_file=''):
 	_ensure_worker()
 	item = {
@@ -318,7 +419,8 @@ def _guide_text():
 		'📘 <b>Гайд по функциям Teddy Invite Pro</b>\n\n'
 		'🧩 <b>Аккаунты • Session</b>\n'
 		'• Загружай .session как документ.\n'
-		'• Смотри список аккаунтов и удаляй ненужные.\n\n'
+		'• После загрузки аккаунт автоматически проверяется.\n'
+		'• В списке видно статус: active / limited / dead.\n\n'
 		'🔎 <b>Парсинг • Аудитория</b>\n'
 		'• Сбор пользователей из участников и комментариев.\n'
 		'• Работает по одному или нескольким источникам.\n'
@@ -500,6 +602,9 @@ def _build_accounts_menu():
 	keyboard = types.InlineKeyboardMarkup()
 	keyboard.add(
 		types.InlineKeyboardButton(text='📄 Список аккаунтов', callback_data='accounts_list'),
+		types.InlineKeyboardButton(text='🔍 Проверить аккаунты', callback_data='accounts_check_all'),
+	)
+	keyboard.add(
 		types.InlineKeyboardButton(text='🗑 Удалить аккаунт', callback_data='accounts_delete_menu'),
 	)
 	keyboard.add(types.InlineKeyboardButton(text='⬅️ Назад', callback_data='main_menu'))
@@ -639,7 +744,17 @@ def receive_session_file(message):
 	filename = os.path.basename(doc.file_name)
 	with open(filename, 'wb') as f:
 		f.write(data)
-	bot.send_message(message.chat.id, f'✅ Аккаунт добавлен: {filename}\nВсего аккаунтов: {len(list_sessions())}')
+	status, details = _check_account_health(filename)
+	prev = set_account_health(filename, status, details)
+	_notify_health_change_if_needed(filename, prev, status, details)
+	bot.send_message(
+		message.chat.id,
+		f'✅ Аккаунт добавлен: <code>{filename}</code>\n'
+		f'Статус: {_account_status_emoji(status)} <b>{status.upper()}</b>\n'
+		f'Детали: <code>{details[:300] if details else "-"}</code>\n'
+		f'Всего аккаунтов: <b>{len(list_sessions())}</b>',
+		parse_mode='HTML'
+	)
 
 
 def parser_step_sources(message):
@@ -958,12 +1073,26 @@ def podcategors(call):
 
 	if call.data == 'accounts_menu':
 		sessions = list_sessions()
+		active = 0
+		limited = 0
+		dead = 0
+		for s in sessions:
+			st, _, _ = get_account_health(s)
+			if st == 'active':
+				active += 1
+			elif st == 'limited':
+				limited += 1
+			elif st == 'dead':
+				dead += 1
 		_render_inline(
 			call.message.chat.id,
 			call.message.message_id,
-			f'📂 Управление аккаунтами\nЗагружено аккаунтов: {len(sessions)}\n\nОтправь .session файл документом, чтобы добавить аккаунт.',
+			f'📂 <b>Управление аккаунтами</b>\n'
+			f'Загружено: <b>{len(sessions)}</b>\n'
+			f'🟢 active: <b>{active}</b> | 🟠 limited: <b>{limited}</b> | 🔴 dead: <b>{dead}</b>\n\n'
+			'Отправь <code>.session</code> файлом — проверка выполнится автоматически.',
 			reply_markup=_build_accounts_menu(),
-			parse_mode=None
+			parse_mode='HTML'
 		)
 		return
 
@@ -972,8 +1101,28 @@ def podcategors(call):
 		if len(sessions) == 0:
 			bot.send_message(call.message.chat.id, 'Аккаунты не добавлены.')
 			return
-		text = '📄 Аккаунты:\n' + '\n'.join([f'{idx + 1}. {s}' for idx, s in enumerate(sessions)])
-		bot.send_message(call.message.chat.id, text)
+		lines = []
+		for idx, s in enumerate(sessions, start=1):
+			status, details, _ = get_account_health(s)
+			lines.append(f'{idx}. {_account_status_emoji(status)} <code>{s}</code> — <b>{status.upper()}</b>')
+			if details:
+				lines.append(f'   <code>{details[:120]}</code>')
+		bot.send_message(call.message.chat.id, '📄 <b>Список аккаунтов</b>\n\n' + '\n'.join(lines), parse_mode='HTML')
+		return
+
+	if call.data == 'accounts_check_all':
+		sessions = list_sessions()
+		if len(sessions) == 0:
+			bot.send_message(call.message.chat.id, 'Аккаунты не добавлены.')
+			return
+		bot.send_message(call.message.chat.id, '🔍 Запускаю проверку аккаунтов...')
+		lines = []
+		for s in sessions:
+			status, details = _check_account_health(s)
+			prev = set_account_health(s, status, details)
+			_notify_health_change_if_needed(s, prev, status, details)
+			lines.append(f'{_account_status_emoji(status)} <code>{s}</code> — <b>{status.upper()}</b>')
+		bot.send_message(call.message.chat.id, '✅ Проверка завершена\n\n' + '\n'.join(lines), parse_mode='HTML')
 		return
 
 	if call.data == 'accounts_delete_menu':
@@ -1271,6 +1420,7 @@ def new_data(message):
 
 def run_bot_polling():
 	# Reset webhook mode to avoid clashes between webhook and long polling.
+	_ensure_account_monitor()
 	try:
 		bot.remove_webhook()
 	except Exception:

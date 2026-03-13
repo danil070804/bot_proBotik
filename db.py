@@ -78,6 +78,11 @@ def init_db():
                 'CREATE TABLE IF NOT EXISTS account_cooldowns('
                 'session TEXT PRIMARY KEY, cooldown_until TIMESTAMP NOT NULL, reason TEXT, updated_at TIMESTAMP DEFAULT NOW())'
             )
+            cursor.execute(
+                'CREATE TABLE IF NOT EXISTS account_health('
+                'session TEXT PRIMARY KEY, status TEXT NOT NULL, details TEXT, '
+                'last_check TIMESTAMP DEFAULT NOW(), updated_at TIMESTAMP DEFAULT NOW())'
+            )
         else:
             cursor.execute('CREATE TABLE IF NOT EXISTS chats(acc TEXT, chat TEXT UNIQUE)')
             cursor.execute(
@@ -124,6 +129,11 @@ def init_db():
             cursor.execute(
                 'CREATE TABLE IF NOT EXISTS account_cooldowns('
                 'session TEXT PRIMARY KEY, cooldown_until INTEGER NOT NULL, reason TEXT, updated_at TEXT DEFAULT CURRENT_TIMESTAMP)'
+            )
+            cursor.execute(
+                'CREATE TABLE IF NOT EXISTS account_health('
+                'session TEXT PRIMARY KEY, status TEXT NOT NULL, details TEXT, '
+                'last_check TEXT DEFAULT CURRENT_TIMESTAMP, updated_at TEXT DEFAULT CURRENT_TIMESTAMP)'
             )
         conn.commit()
         cursor.close()
@@ -519,6 +529,59 @@ def get_account_cooldown_remaining(session):
             remaining = max(0, until_ts - int(_time.time()))
         cursor.close()
         return remaining
+
+
+def set_account_health(session, status, details=''):
+    session = str(session or '').strip()
+    status = str(status or 'unknown').strip().lower()
+    details = str(details or '').strip()
+    if not session:
+        return ''
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        if IS_POSTGRES:
+            cursor.execute('SELECT status FROM account_health WHERE session = %s', (session,))
+        else:
+            cursor.execute('SELECT status FROM account_health WHERE session = ?', (session,))
+        row = cursor.fetchone()
+        prev_status = row[0] if row else ''
+        if IS_POSTGRES:
+            cursor.execute(
+                'INSERT INTO account_health(session, status, details) VALUES (%s, %s, %s) '
+                'ON CONFLICT (session) DO UPDATE SET '
+                'status = EXCLUDED.status, details = EXCLUDED.details, last_check = NOW(), '
+                'updated_at = CASE WHEN account_health.status <> EXCLUDED.status THEN NOW() ELSE account_health.updated_at END',
+                (session, status, details),
+            )
+        else:
+            cursor.execute(
+                'INSERT INTO account_health(session, status, details, last_check, updated_at) '
+                'VALUES (?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) '
+                'ON CONFLICT(session) DO UPDATE SET '
+                'status = excluded.status, details = excluded.details, last_check = CURRENT_TIMESTAMP, '
+                'updated_at = CASE WHEN account_health.status <> excluded.status THEN CURRENT_TIMESTAMP ELSE account_health.updated_at END',
+                (session, status, details),
+            )
+        conn.commit()
+        cursor.close()
+        return prev_status
+
+
+def get_account_health(session):
+    session = str(session or '').strip()
+    if not session:
+        return ('unknown', '', '')
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        if IS_POSTGRES:
+            cursor.execute('SELECT status, details, last_check FROM account_health WHERE session = %s', (session,))
+        else:
+            cursor.execute('SELECT status, details, last_check FROM account_health WHERE session = ?', (session,))
+        row = cursor.fetchone()
+        cursor.close()
+        if not row:
+            return ('unknown', '', '')
+        return (row[0] or 'unknown', row[1] or '', str(row[2] or ''))
 
 init_db()
 
