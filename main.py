@@ -59,6 +59,17 @@ DEFAULT_APP_SETTINGS = {
 	'active_preset': 'standard',
 }
 PRESET_CONFIGS = {
+	'super_safe': {
+		'parser_posts_limit': '40',
+		'parser_comments_limit': '60',
+		'inviter_limit': '15',
+		'inviter_sleep': '45',
+		'inviter_per_account_limit': '5',
+		'inviter_max_flood_wait': '1800',
+		'parser_use_all_sessions': '1',
+		'inviter_use_all_sessions': '1',
+		'active_preset': 'super_safe',
+	},
 	'soft': {
 		'parser_posts_limit': '80',
 		'parser_comments_limit': '120',
@@ -644,6 +655,7 @@ def _setting_title(key):
 
 def _preset_title(name):
 	return {
+		'super_safe': 'Супер-щадящий',
 		'soft': 'Мягкий',
 		'standard': 'Стандарт',
 		'aggressive': 'Агрессивный',
@@ -673,6 +685,7 @@ def _settings_text():
 
 def _build_settings_menu():
 	keyboard = types.InlineKeyboardMarkup()
+	keyboard.add(types.InlineKeyboardButton(text='🛡 Пресет: Супер-щадящий', callback_data='settings_preset|super_safe'))
 	keyboard.add(
 		types.InlineKeyboardButton(text='🟢 Пресет: Мягкий', callback_data='settings_preset|soft'),
 		types.InlineKeyboardButton(text='🟡 Пресет: Стандарт', callback_data='settings_preset|standard'),
