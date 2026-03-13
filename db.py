@@ -60,6 +60,10 @@ def init_db():
                 'user_id BIGINT, status TEXT NOT NULL, error TEXT, created_at TIMESTAMP DEFAULT NOW(), '
                 'UNIQUE(invite_target, username))'
             )
+            cursor.execute(
+                'CREATE TABLE IF NOT EXISTS app_settings('
+                'key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TIMESTAMP DEFAULT NOW())'
+            )
         else:
             cursor.execute('CREATE TABLE IF NOT EXISTS chats(acc TEXT, chat TEXT UNIQUE)')
             cursor.execute(
@@ -90,6 +94,10 @@ def init_db():
                 'source_target TEXT, invite_target TEXT, username TEXT, user_id INTEGER, '
                 'status TEXT, error TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP, '
                 'UNIQUE(invite_target, username))'
+            )
+            cursor.execute(
+                'CREATE TABLE IF NOT EXISTS app_settings('
+                'key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT DEFAULT CURRENT_TIMESTAMP)'
             )
         conn.commit()
         cursor.close()
@@ -240,6 +248,33 @@ def mark_invite_result(source_target, invite_target, username, user_id, status, 
                 'VALUES (?, ?, ?, ?, ?, ?)',
                 (source_target, invite_target, username, user_id, status, error),
             )
+        conn.commit()
+        cursor.close()
+
+
+def get_app_setting(key, default_value=''):
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        if IS_POSTGRES:
+            cursor.execute('SELECT value FROM app_settings WHERE key = %s', (key,))
+        else:
+            cursor.execute('SELECT value FROM app_settings WHERE key = ?', (key,))
+        row = cursor.fetchone()
+        cursor.close()
+        return row[0] if row else default_value
+
+
+def set_app_setting(key, value):
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        if IS_POSTGRES:
+            cursor.execute(
+                'INSERT INTO app_settings(key, value) VALUES (%s, %s) '
+                'ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()',
+                (key, str(value)),
+            )
+        else:
+            cursor.execute('INSERT OR REPLACE INTO app_settings(key, value) VALUES (?, ?)', (key, str(value)))
         conn.commit()
         cursor.close()
 

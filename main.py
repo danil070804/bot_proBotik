@@ -21,7 +21,7 @@ import hashlib
 import config
 from getpass import getpass
 import pytz
-from db import get_main_connection, init_db
+from db import get_main_connection, init_db, get_app_setting, set_app_setting
 
 from pyqiwip2p import QiwiP2P
 from pyqiwip2p.p2p_types import QiwiCustomer, QiwiDatetime
@@ -35,6 +35,16 @@ USER_STATE = {}
 RUNNING_TASKS = {}
 TASK_QUEUE = Queue()
 TASK_LOCK = threading.Lock()
+DEFAULT_APP_SETTINGS = {
+	'parser_posts_limit': '100',
+	'parser_comments_limit': '200',
+	'parser_use_all_sessions': '1',
+	'inviter_limit': '100',
+	'inviter_sleep': '15',
+	'inviter_per_account_limit': str(config.invite_per_account_limit),
+	'inviter_max_flood_wait': str(config.invite_max_flood_wait),
+	'inviter_use_all_sessions': '1',
+}
 
 
 def build_new_menu():
@@ -51,6 +61,7 @@ def build_new_menu():
 		types.InlineKeyboardButton(text='⚙️ Управление • Процессы', callback_data='manage_menu'),
 		types.InlineKeyboardButton(text='📈 Аналитика • Отчёты', callback_data='stats_overview'),
 	)
+	keyboard.add(types.InlineKeyboardButton(text='🛠 Настройки • Парсинг/Инвайт', callback_data='settings_menu'))
 	keyboard.add(types.InlineKeyboardButton(text='ℹ️ Помощь • Гайд', callback_data='help_new'))
 	return keyboard
 
@@ -198,6 +209,57 @@ def _is_admin(user_id):
 
 def _deny_access(chat_id):
 	bot.send_message(chat_id, '⛔ Доступ закрыт. Этим ботом может пользоваться только администратор.')
+
+
+def _get_setting(key):
+	return get_app_setting(key, DEFAULT_APP_SETTINGS.get(key, ''))
+
+
+def _set_setting(key, value):
+	set_app_setting(key, value)
+
+
+def _setting_int(key):
+	try:
+		return int(_get_setting(key))
+	except Exception:
+		return int(DEFAULT_APP_SETTINGS.get(key, '0') or 0)
+
+
+def _setting_bool(key):
+	return str(_get_setting(key)).strip() in ['1', 'true', 'True', 'yes']
+
+
+def _settings_text():
+	return (
+		'⚙️ Настройки парсинга и инвайта\n'
+		f'• Парсинг: posts={_setting_int("parser_posts_limit")}, comments={_setting_int("parser_comments_limit")}, '
+		f'все аккаунты={"ON" if _setting_bool("parser_use_all_sessions") else "OFF"}\n'
+		f'• Инвайт: limit={_setting_int("inviter_limit")}, sleep={_setting_int("inviter_sleep")}s, '
+		f'per_acc={_setting_int("inviter_per_account_limit")}, max_flood={_setting_int("inviter_max_flood_wait")}s, '
+		f'все аккаунты={"ON" if _setting_bool("inviter_use_all_sessions") else "OFF"}'
+	)
+
+
+def _build_settings_menu():
+	keyboard = types.InlineKeyboardMarkup()
+	keyboard.add(
+		types.InlineKeyboardButton(text='✏️ Parser posts', callback_data='settings_edit|parser_posts_limit'),
+		types.InlineKeyboardButton(text='✏️ Parser comments', callback_data='settings_edit|parser_comments_limit'),
+	)
+	keyboard.add(types.InlineKeyboardButton(text='🔁 Parser all sessions', callback_data='settings_toggle|parser_use_all_sessions'))
+	keyboard.add(
+		types.InlineKeyboardButton(text='✏️ Invite limit', callback_data='settings_edit|inviter_limit'),
+		types.InlineKeyboardButton(text='✏️ Invite sleep', callback_data='settings_edit|inviter_sleep'),
+	)
+	keyboard.add(
+		types.InlineKeyboardButton(text='✏️ Per-account limit', callback_data='settings_edit|inviter_per_account_limit'),
+		types.InlineKeyboardButton(text='✏️ Max flood wait', callback_data='settings_edit|inviter_max_flood_wait'),
+	)
+	keyboard.add(types.InlineKeyboardButton(text='🔁 Invite all sessions', callback_data='settings_toggle|inviter_use_all_sessions'))
+	keyboard.add(types.InlineKeyboardButton(text='♻️ Сброс по умолчанию', callback_data='settings_reset'))
+	keyboard.add(types.InlineKeyboardButton(text='⬅️ Назад', callback_data='main_menu'))
+	return keyboard
 
 
 def _build_manage_menu():
@@ -358,9 +420,11 @@ def parser_step_sources(message):
 		bot.send_message(message.chat.id, '❌ Действие отменено.', reply_markup=build_new_menu())
 		return
 	USER_STATE[message.chat.id] = {'flow': 'parser', 'sources': message.text}
+	default_posts = _setting_int('parser_posts_limit')
 	msg = bot.send_message(
 		message.chat.id,
-		'🔎 Парсинг • Шаг 2/3\nУкажи количество постов для анализа (например: 100).',
+		f'🔎 Парсинг • Шаг 2/3\nУкажи количество постов для анализа.\nТекущее значение по умолчанию: <b>{default_posts}</b>.',
+		parse_mode='HTML',
 		reply_markup=_step_keyboard()
 	)
 	bot.register_next_step_handler(msg, parser_step_posts)
@@ -378,11 +442,12 @@ def parser_step_posts(message):
 	try:
 		state['posts_limit'] = int(message.text.strip())
 	except (TypeError, ValueError):
-		state['posts_limit'] = 100
+		state['posts_limit'] = _setting_int('parser_posts_limit')
 	USER_STATE[message.chat.id] = state
 	msg = bot.send_message(
 		message.chat.id,
-		'🔎 Парсинг • Шаг 3/3\nУкажи лимит комментариев (например: 200).',
+		f'🔎 Парсинг • Шаг 3/3\nУкажи лимит комментариев.\nТекущее значение по умолчанию: <b>{_setting_int("parser_comments_limit")}</b>.',
+		parse_mode='HTML',
 		reply_markup=_step_keyboard()
 	)
 	bot.register_next_step_handler(msg, parser_step_comments)
@@ -400,7 +465,7 @@ def parser_step_comments(message):
 	try:
 		comments_limit = int(message.text.strip())
 	except (TypeError, ValueError):
-		comments_limit = 200
+		comments_limit = _setting_int('parser_comments_limit')
 	file_name, sources_count = _save_targets_file(message.chat.id, state.get('sources', ''), 'parser_sources')
 	if sources_count == 0:
 		bot.send_message(message.chat.id, '⚠️ Не нашёл источники. Запусти парсинг заново.', reply_markup=build_new_menu())
@@ -409,9 +474,10 @@ def parser_step_comments(message):
 		sys.executable, 'parser.py',
 		'--targets-file', file_name,
 		'--posts-limit', str(state.get('posts_limit', 100)),
-		'--comments-limit', str(comments_limit),
-		'--use-all-sessions'
+		'--comments-limit', str(comments_limit)
 	]
+	if _setting_bool('parser_use_all_sessions'):
+		command.append('--use-all-sessions')
 	progress_file = _progress_file(message.chat.id, 'parser')
 	command += ['--progress-file', progress_file]
 	queue_pos = _enqueue_process(message.chat.id, f'parser ({sources_count} sources)', command, progress_file=progress_file)
@@ -453,7 +519,8 @@ def inviter_step_target(message):
 	USER_STATE[message.chat.id] = state
 	msg = bot.send_message(
 		message.chat.id,
-		'📨 Инвайт • Шаг 3/4\nЛимит пользователей за запуск (например: 100).',
+		f'📨 Инвайт • Шаг 3/4\nЛимит пользователей за запуск.\nПо умолчанию: <b>{_setting_int("inviter_limit")}</b>.',
+		parse_mode='HTML',
 		reply_markup=_step_keyboard()
 	)
 	bot.register_next_step_handler(msg, inviter_step_limit)
@@ -471,11 +538,12 @@ def inviter_step_limit(message):
 	try:
 		state['limit'] = int(message.text.strip())
 	except (TypeError, ValueError):
-		state['limit'] = 100
+		state['limit'] = _setting_int('inviter_limit')
 	USER_STATE[message.chat.id] = state
 	msg = bot.send_message(
 		message.chat.id,
-		'📨 Инвайт • Шаг 4/4\nПауза между инвайтами в секундах (например: 15).',
+		f'📨 Инвайт • Шаг 4/4\nПауза между инвайтами (секунды).\nПо умолчанию: <b>{_setting_int("inviter_sleep")}</b>.',
+		parse_mode='HTML',
 		reply_markup=_step_keyboard()
 	)
 	bot.register_next_step_handler(msg, inviter_step_sleep)
@@ -493,7 +561,7 @@ def inviter_step_sleep(message):
 	try:
 		sleep_sec = int(message.text.strip())
 	except (TypeError, ValueError):
-		sleep_sec = 15
+		sleep_sec = _setting_int('inviter_sleep')
 	file_name, sources_count = _save_targets_file(message.chat.id, state.get('sources', ''), 'inviter_sources')
 	if sources_count == 0:
 		bot.send_message(message.chat.id, '⚠️ Не нашёл источники. Запусти инвайт заново.', reply_markup=build_new_menu())
@@ -502,17 +570,40 @@ def inviter_step_sleep(message):
 		sys.executable, 'inviter.py',
 		'--sources-file', file_name,
 		'--invite-target', state.get('invite_target', ''),
-		'--limit', str(state.get('limit', 100)),
+		'--limit', str(state.get('limit', _setting_int('inviter_limit'))),
 		'--sleep', str(sleep_sec),
-		'--per-account-limit', str(config.invite_per_account_limit),
-		'--max-flood-wait', str(config.invite_max_flood_wait),
-		'--use-all-sessions'
+		'--per-account-limit', str(_setting_int('inviter_per_account_limit')),
+		'--max-flood-wait', str(_setting_int('inviter_max_flood_wait'))
 	]
+	if _setting_bool('inviter_use_all_sessions'):
+		command.append('--use-all-sessions')
 	progress_file = _progress_file(message.chat.id, 'inviter')
 	command += ['--progress-file', progress_file]
 	queue_pos = _enqueue_process(message.chat.id, f'inviter ({sources_count} sources)', command, progress_file=progress_file)
 	USER_STATE.pop(message.chat.id, None)
 	bot.send_message(message.chat.id, f'✅ Инвайт добавлен в очередь.\nИсточников: {sources_count}\nПозиция: ~{queue_pos}', reply_markup=build_new_menu())
+
+
+def settings_value_step(message):
+	if not _is_admin(message.chat.id):
+		_deny_access(message.chat.id)
+		return
+	if _is_cancel(message.text):
+		USER_STATE.pop(message.chat.id, None)
+		bot.send_message(message.chat.id, '❌ Изменение настройки отменено.', reply_markup=_build_settings_menu())
+		return
+	state = USER_STATE.get(message.chat.id, {})
+	key = state.get('settings_key')
+	if not key:
+		bot.send_message(message.chat.id, 'Сессия настройки потеряна. Открой настройки заново.', reply_markup=build_new_menu())
+		return
+	val = str(message.text).strip()
+	if not val.isdigit():
+		bot.send_message(message.chat.id, 'Нужно ввести целое число. Попробуйте ещё раз.', reply_markup=_step_keyboard())
+		return
+	_set_setting(key, val)
+	USER_STATE.pop(message.chat.id, None)
+	bot.send_message(message.chat.id, f'✅ Настройка <code>{key}</code> обновлена: <b>{val}</b>', parse_mode='HTML', reply_markup=_build_settings_menu())
 
 @bot.callback_query_handler(func=lambda call:True)
 def podcategors(call):
@@ -531,6 +622,35 @@ def podcategors(call):
 
 	if call.data == 'main_menu':
 		bot.send_message(call.message.chat.id, '✨ Главное меню:', reply_markup=build_new_menu())
+		return
+
+	if call.data == 'settings_menu':
+		bot.send_message(call.message.chat.id, _settings_text(), reply_markup=_build_settings_menu())
+		return
+
+	if call.data == 'settings_reset':
+		for k, v in DEFAULT_APP_SETTINGS.items():
+			_set_setting(k, v)
+		bot.send_message(call.message.chat.id, '♻️ Настройки сброшены к значениям по умолчанию.', reply_markup=_build_settings_menu())
+		return
+
+	if call.data.startswith('settings_toggle|'):
+		key = call.data.split('|', 1)[1]
+		cur = _setting_bool(key)
+		_set_setting(key, '0' if cur else '1')
+		bot.send_message(call.message.chat.id, f'✅ {key}: {"OFF" if cur else "ON"}', reply_markup=_build_settings_menu())
+		return
+
+	if call.data.startswith('settings_edit|'):
+		key = call.data.split('|', 1)[1]
+		USER_STATE[call.message.chat.id] = {'flow': 'settings', 'settings_key': key}
+		msg = bot.send_message(
+			call.message.chat.id,
+			f'🛠 Введите новое числовое значение для <code>{key}</code>.\nТекущее: <b>{_get_setting(key)}</b>',
+			parse_mode='HTML',
+			reply_markup=_step_keyboard()
+		)
+		bot.register_next_step_handler(msg, settings_value_step)
 		return
 
 	if call.data == 'accounts_menu':
@@ -578,7 +698,10 @@ def podcategors(call):
 	if call.data == 'parser_start':
 		msg = bot.send_message(
 			call.message.chat.id,
-			'🔎 Парсинг\nШаг 1/3: отправь источники (через запятую или с новой строки).\nПример:\n@chat1\n@chat2',
+			'🔎 Парсинг\nШаг 1/3: отправь источники (через запятую или с новой строки).\n'
+			f'Текущие настройки: posts={_setting_int("parser_posts_limit")}, comments={_setting_int("parser_comments_limit")}, '
+			f'all_sessions={"ON" if _setting_bool("parser_use_all_sessions") else "OFF"}.\n'
+			'Пример:\n@chat1\n@chat2',
 			reply_markup=_step_keyboard()
 		)
 		bot.register_next_step_handler(msg, parser_step_sources)
@@ -587,7 +710,10 @@ def podcategors(call):
 	if call.data == 'inviter_start':
 		msg = bot.send_message(
 			call.message.chat.id,
-			'📨 Инвайт\nШаг 1/4: отправь источники, из которых брать пользователей.',
+			'📨 Инвайт\nШаг 1/4: отправь источники, из которых брать пользователей.\n'
+			f'Текущие настройки: limit={_setting_int("inviter_limit")}, sleep={_setting_int("inviter_sleep")}s, '
+			f'per_acc={_setting_int("inviter_per_account_limit")}, flood={_setting_int("inviter_max_flood_wait")}s, '
+			f'all_sessions={"ON" if _setting_bool("inviter_use_all_sessions") else "OFF"}.',
 			reply_markup=_step_keyboard()
 		)
 		bot.register_next_step_handler(msg, inviter_step_sources)
