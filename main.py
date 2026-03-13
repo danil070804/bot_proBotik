@@ -30,6 +30,9 @@ from db import (
 	get_account_health, set_account_health
 )
 from telethon import TelegramClient
+from telethon.errors import UserAlreadyParticipantError
+from telethon.tl.functions.channels import JoinChannelRequest
+from telethon.tl.functions.messages import ImportChatInviteRequest
 from functions import get_proxy
 
 from pyqiwip2p import QiwiP2P
@@ -146,6 +149,12 @@ def _health_details_ru(details):
 		return 'Авторизация успешна'
 	if 'Cannot get entity from a channel' in text:
 		return 'Нет доступа к тестовому чату: аккаунт не состоит в нём'
+	if 'Не удалось вступить в тестовый чат' in text:
+		return text
+	if 'Ограничения обнаружены через @SpamBot' in text:
+		return text
+	if 'Ограничений через @SpamBot не обнаружено' in text:
+		return text
 	if 'PeerFloodError' in text:
 		return 'Спам-ограничение Telegram (PeerFlood)'
 	if 'FloodWaitError' in text:
@@ -159,6 +168,56 @@ def _health_details_ru(details):
 	if 'PhoneNumberBannedError' in text:
 		return 'Номер аккаунта заблокирован Telegram'
 	return text
+
+
+def _invite_hash_from_link(link):
+	s = str(link or '').strip()
+	if 'joinchat/' in s:
+		return s.split('joinchat/', 1)[1].strip().strip('/')
+	if 't.me/+' in s:
+		return s.split('t.me/+', 1)[1].strip().strip('/')
+	if s.startswith('+'):
+		return s[1:].strip()
+	return ''
+
+
+async def _join_test_chat_if_needed(client):
+	target = str(config.account_check_chat or '').strip()
+	if not target:
+		return
+	join_hash = _invite_hash_from_link(target)
+	try:
+		if join_hash:
+			await client(ImportChatInviteRequest(join_hash))
+			return
+		entity = await client.get_entity(target)
+		try:
+			await client(JoinChannelRequest(entity))
+		except UserAlreadyParticipantError:
+			return
+	except UserAlreadyParticipantError:
+		return
+	except Exception as e:
+		raise RuntimeError(f'Не удалось вступить в тестовый чат: {e}')
+
+
+async def _probe_spam_block(client):
+	try:
+		spam_bot = await client.get_entity('SpamBot')
+		await client.send_message(spam_bot, '/start')
+		await asyncio.sleep(1)
+		msgs = await client.get_messages(spam_bot, limit=1)
+		text = (msgs[0].message or '') if msgs else ''
+		lower = text.lower()
+		bad = ['limited', 'огранич', 'cannot', "can't", 'спам', 'spam']
+		ok = ['no limits', 'good news', 'нет ограничений']
+		if any(x in lower for x in ok):
+			return 'active', 'Ограничений через @SpamBot не обнаружено'
+		if any(x in lower for x in bad):
+			return 'limited', 'Ограничения обнаружены через @SpamBot'
+		return 'active', 'Базовая проверка пройдена'
+	except Exception:
+		return 'active', 'Базовая проверка пройдена'
 
 
 def _detect_health_status_by_error(exc):
@@ -182,7 +241,7 @@ def _detect_health_status_by_error(exc):
 	return 'limited', text
 
 
-def _check_account_health(session):
+def _check_account_health(session, deep_check=False):
 	async def _run():
 		client = None
 		try:
@@ -191,11 +250,13 @@ def _check_account_health(session):
 			if not await client.is_user_authorized():
 				return 'dead', 'Сессия не авторизована'
 			me = await client.get_me()
-			if config.account_check_chat:
-				await client.get_entity(config.account_check_chat)
+			await _join_test_chat_if_needed(client)
+			if deep_check:
+				probe_status, probe_reason = await _probe_spam_block(client)
+				if probe_status == 'limited':
+					return 'limited', probe_reason
 			user_label = f'@{me.username}' if getattr(me, 'username', None) else f'id={getattr(me, "id", "n/a")}'
-			extra = f' | test={config.account_check_chat}' if config.account_check_chat else ''
-			return 'active', f'Авторизация успешна: {user_label}{extra}'
+			return 'active', f'Аккаунт рабочий: {user_label}'
 		except Exception as e:
 			return _detect_health_status_by_error(e)
 		finally:
@@ -790,7 +851,7 @@ def receive_session_file(message):
 	filename = os.path.basename(doc.file_name)
 	with open(filename, 'wb') as f:
 		f.write(data)
-	status, details = _check_account_health(filename)
+	status, details = _check_account_health(filename, deep_check=True)
 	prev = set_account_health(filename, status, details)
 	_notify_health_change_if_needed(filename, prev, status, details)
 	bot.send_message(
@@ -1164,7 +1225,7 @@ def podcategors(call):
 		bot.send_message(call.message.chat.id, '🔍 Запускаю проверку аккаунтов...')
 		lines = []
 		for s in sessions:
-			status, details = _check_account_health(s)
+			status, details = _check_account_health(s, deep_check=True)
 			prev = set_account_health(s, status, details)
 			_notify_health_change_if_needed(s, prev, status, details)
 			lines.append(f'{_account_status_emoji(status)} <code>{s}</code> — <b>{_account_status_title(status)}</b>')
