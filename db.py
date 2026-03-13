@@ -531,6 +531,34 @@ def get_account_cooldown_remaining(session):
         return remaining
 
 
+def set_account_warmup(session, seconds):
+    session = str(session or '').strip()
+    if not session:
+        return
+    try:
+        seconds = int(seconds)
+    except Exception:
+        seconds = 0
+    if seconds <= 0:
+        set_app_setting(f'warmup_until:{session}', '0')
+        return
+    import time as _time
+    set_app_setting(f'warmup_until:{session}', str(int(_time.time()) + seconds))
+
+
+def get_account_warmup_remaining(session):
+    session = str(session or '').strip()
+    if not session:
+        return 0
+    import time as _time
+    raw = get_app_setting(f'warmup_until:{session}', '0')
+    try:
+        until_ts = int(raw)
+    except Exception:
+        until_ts = 0
+    return max(0, until_ts - int(_time.time()))
+
+
 def set_account_health(session, status, details=''):
     session = str(session or '').strip()
     status = str(status or 'unknown').strip().lower()

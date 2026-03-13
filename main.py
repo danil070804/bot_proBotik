@@ -27,7 +27,7 @@ from db import (
 	get_main_connection, init_db, get_app_setting, set_app_setting,
 	add_source_filter, remove_source_filter, get_source_filters,
 	add_user_filter, remove_user_filter, get_user_filters,
-	get_account_health, set_account_health
+	get_account_health, set_account_health, set_account_warmup, get_account_warmup_remaining
 )
 from telethon.errors import UserAlreadyParticipantError
 from telethon.tl.functions.channels import JoinChannelRequest
@@ -55,6 +55,7 @@ DEFAULT_APP_SETTINGS = {
 	'inviter_per_account_limit': str(config.invite_per_account_limit),
 	'inviter_max_flood_wait': str(config.invite_max_flood_wait),
 	'inviter_use_all_sessions': '1',
+	'account_warmup_days': '2',
 	'active_preset': 'standard',
 }
 PRESET_CONFIGS = {
@@ -67,6 +68,7 @@ PRESET_CONFIGS = {
 		'inviter_max_flood_wait': '1800',
 		'parser_use_all_sessions': '1',
 		'inviter_use_all_sessions': '1',
+		'account_warmup_days': '3',
 		'active_preset': 'super_safe',
 	},
 	'soft': {
@@ -78,6 +80,7 @@ PRESET_CONFIGS = {
 		'inviter_max_flood_wait': '300',
 		'parser_use_all_sessions': '1',
 		'inviter_use_all_sessions': '1',
+		'account_warmup_days': '2',
 		'active_preset': 'soft',
 	},
 	'standard': {
@@ -89,6 +92,7 @@ PRESET_CONFIGS = {
 		'inviter_max_flood_wait': str(config.invite_max_flood_wait),
 		'parser_use_all_sessions': '1',
 		'inviter_use_all_sessions': '1',
+		'account_warmup_days': '2',
 		'active_preset': 'standard',
 	},
 	'aggressive': {
@@ -100,6 +104,7 @@ PRESET_CONFIGS = {
 		'inviter_max_flood_wait': '900',
 		'parser_use_all_sessions': '1',
 		'inviter_use_all_sessions': '1',
+		'account_warmup_days': '1',
 		'active_preset': 'aggressive',
 	},
 }
@@ -145,6 +150,24 @@ def _account_status_title(status):
 		'dead': 'НЕРАБОЧИЙ',
 		'unknown': 'НЕИЗВЕСТНО',
 	}.get(status, 'НЕИЗВЕСТНО')
+
+
+def _fmt_seconds_ru(total_seconds):
+	try:
+		sec = max(0, int(total_seconds))
+	except Exception:
+		sec = 0
+	days = sec // 86400
+	hours = (sec % 86400) // 3600
+	minutes = (sec % 3600) // 60
+	parts = []
+	if days:
+		parts.append(f'{days}д')
+	if hours:
+		parts.append(f'{hours}ч')
+	if minutes or not parts:
+		parts.append(f'{minutes}м')
+	return ' '.join(parts)
 
 
 def _health_details_ru(details):
@@ -537,6 +560,7 @@ def _guide_text():
 		'  • 🟢 <b>ACTIVE</b> — сессия валидна и готова к работе;\n'
 		'  • 🟠 <b>LIMITED</b> — есть ограничения (Flood/PeerFlood/временные ошибки);\n'
 		'  • 🔴 <b>DEAD</b> — сессия невалидна/разлогин/бан/ревок.\n'
+		'• После успешной загрузки аккаунт ставится на прогрев и не участвует в инвайте до окончания таймера.\n'
 		'• Все статусы хранятся в БД (таблица <code>account_health</code>), есть ручная кнопка «Проверить аккаунты» и фоновый монитор.\n'
 		'• При смене статуса бот отправляет уведомление админу.\n\n'
 		'🔎 <b>Парсинг • Аудитория</b>\n'
@@ -650,6 +674,7 @@ def _setting_title(key):
 		'inviter_per_account_limit': 'Лимит добавлений на 1 аккаунт',
 		'inviter_max_flood_wait': 'Максимальный FloodWait (сек)',
 		'inviter_use_all_sessions': 'Использовать все аккаунты в инвайте',
+		'account_warmup_days': 'Дней прогрева после загрузки',
 	}
 	return titles.get(key, key)
 
@@ -680,7 +705,8 @@ def _settings_text():
 		f'все аккаунты={"ВКЛ" if _setting_bool("parser_use_all_sessions") else "ВЫКЛ"}\n'
 		f'• Инвайт: лимит={_setting_int("inviter_limit")}, пауза={_setting_int("inviter_sleep")}с, '
 		f'на аккаунт={_setting_int("inviter_per_account_limit")}, flood={_setting_int("inviter_max_flood_wait")}с, '
-		f'все аккаунты={"ВКЛ" if _setting_bool("inviter_use_all_sessions") else "ВЫКЛ"}'
+		f'все аккаунты={"ВКЛ" if _setting_bool("inviter_use_all_sessions") else "ВЫКЛ"}\n'
+		f'• Прогрев аккаунтов: {_setting_int("account_warmup_days")} дн.'
 	)
 
 
@@ -705,6 +731,7 @@ def _build_settings_menu():
 		types.InlineKeyboardButton(text='✏️ Лимит на аккаунт', callback_data='settings_edit|inviter_per_account_limit'),
 		types.InlineKeyboardButton(text='✏️ Макс. FloodWait', callback_data='settings_edit|inviter_max_flood_wait'),
 	)
+	keyboard.add(types.InlineKeyboardButton(text='🕒 Дни прогрева аккаунтов', callback_data='settings_edit|account_warmup_days'))
 	keyboard.add(types.InlineKeyboardButton(text='🔁 Все аккаунты (инвайт)', callback_data='settings_toggle|inviter_use_all_sessions'))
 	keyboard.add(types.InlineKeyboardButton(text='♻️ Сброс по умолчанию', callback_data='settings_reset'))
 	keyboard.add(types.InlineKeyboardButton(text='⬅️ Назад', callback_data='main_menu'))
@@ -865,7 +892,7 @@ def receive_session_file(message):
 	filename = os.path.basename(doc.file_name)
 	with open(filename, 'wb') as f:
 		f.write(data)
-	status, details = _check_account_health(filename, deep_check=True)
+	status, details = _check_account_health(filename, deep_check=False)
 	prev = set_account_health(filename, status, details)
 	_notify_health_change_if_needed(filename, prev, status, details)
 	if status == 'dead':
@@ -882,12 +909,18 @@ def receive_session_file(message):
 			parse_mode='HTML'
 		)
 		return
+	if status == 'active':
+		warmup_days = max(0, _setting_int('account_warmup_days'))
+		set_account_warmup(filename, warmup_days * 86400)
+		warmup_text = f'\nПрогрев до инвайта: <b>{warmup_days} дн.</b>' if warmup_days > 0 else ''
+	else:
+		warmup_text = ''
 	bot.send_message(
 		message.chat.id,
 		f'✅ Аккаунт добавлен: <code>{filename}</code>\n'
 		f'Статус: {_account_status_emoji(status)} <b>{_account_status_title(status)}</b>\n'
 		f'Детали: <code>{_health_details_ru(details)[:300]}</code>\n'
-		f'Всего аккаунтов: <b>{len(list_sessions())}</b>',
+		f'Всего аккаунтов: <b>{len(list_sessions())}</b>{warmup_text}',
 		parse_mode='HTML'
 	)
 
@@ -1211,6 +1244,7 @@ def podcategors(call):
 		active = 0
 		limited = 0
 		dead = 0
+		warming = 0
 		for s in sessions:
 			st, _, _ = get_account_health(s)
 			if st == 'active':
@@ -1219,12 +1253,15 @@ def podcategors(call):
 				limited += 1
 			elif st == 'dead':
 				dead += 1
+			if get_account_warmup_remaining(s) > 0:
+				warming += 1
 		_render_inline(
 			call.message.chat.id,
 			call.message.message_id,
 			f'📂 <b>Управление аккаунтами</b>\n'
 			f'Загружено: <b>{len(sessions)}</b>\n'
-			f'🟢 active: <b>{active}</b> | 🟠 limited: <b>{limited}</b> | 🔴 dead: <b>{dead}</b>\n\n'
+			f'🟢 active: <b>{active}</b> | 🟠 limited: <b>{limited}</b> | 🔴 dead: <b>{dead}</b>\n'
+			f'🕒 На прогреве: <b>{warming}</b>\n\n'
 			'Отправь <code>.session</code> или <code>.json</code> файлом — проверка выполнится автоматически.',
 			reply_markup=_build_accounts_menu(),
 			parse_mode='HTML'
@@ -1242,6 +1279,9 @@ def podcategors(call):
 			lines.append(f'{idx}. {_account_status_emoji(status)} <code>{s}</code> — <b>{_account_status_title(status)}</b>')
 			if details:
 				lines.append(f'   <code>{_health_details_ru(details)[:120]}</code>')
+			rem = get_account_warmup_remaining(s)
+			if rem > 0:
+				lines.append(f'   🕒 Прогрев: <b>{_fmt_seconds_ru(rem)}</b>')
 		bot.send_message(call.message.chat.id, '📄 <b>Список аккаунтов</b>\n\n' + '\n'.join(lines), parse_mode='HTML')
 		return
 
@@ -1253,7 +1293,7 @@ def podcategors(call):
 		bot.send_message(call.message.chat.id, '🔍 Запускаю проверку аккаунтов...')
 		lines = []
 		for s in sessions:
-			status, details = _check_account_health(s, deep_check=True)
+			status, details = _check_account_health(s, deep_check=False)
 			prev = set_account_health(s, status, details)
 			_notify_health_change_if_needed(s, prev, status, details)
 			lines.append(f'{_account_status_emoji(status)} <code>{s}</code> — <b>{_account_status_title(status)}</b>')

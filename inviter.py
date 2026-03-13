@@ -23,6 +23,7 @@ from db import (
     is_username_allowed,
     set_account_cooldown,
     get_account_cooldown_remaining,
+    get_account_warmup_remaining,
     set_account_health,
 )
 from functions import get_proxy, get_sessions, build_telegram_client
@@ -96,7 +97,7 @@ def _pick_next_session(sessions, start_idx):
     for offset in range(total):
         i = (start_idx + offset) % total
         sess = sessions[i]
-        if get_account_cooldown_remaining(sess) == 0:
+        if max(get_account_cooldown_remaining(sess), get_account_warmup_remaining(sess)) == 0:
             return i, sess
     return None, None
 
@@ -185,7 +186,7 @@ async def run_inviter(
         for source_row, username, user_id in rows:
             idx, session = _pick_next_session(selected_sessions, rr_index)
             if session is None:
-                min_wait = min([get_account_cooldown_remaining(s) for s in selected_sessions] or [10])
+                min_wait = min([max(get_account_cooldown_remaining(s), get_account_warmup_remaining(s)) for s in selected_sessions] or [10])
                 await asyncio.sleep(max(3, min_wait))
                 idx, session = _pick_next_session(selected_sessions, 0)
                 if session is None:
