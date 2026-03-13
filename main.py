@@ -44,6 +44,42 @@ DEFAULT_APP_SETTINGS = {
 	'inviter_per_account_limit': str(config.invite_per_account_limit),
 	'inviter_max_flood_wait': str(config.invite_max_flood_wait),
 	'inviter_use_all_sessions': '1',
+	'active_preset': 'standard',
+}
+PRESET_CONFIGS = {
+	'soft': {
+		'parser_posts_limit': '80',
+		'parser_comments_limit': '120',
+		'inviter_limit': '40',
+		'inviter_sleep': '25',
+		'inviter_per_account_limit': '10',
+		'inviter_max_flood_wait': '300',
+		'parser_use_all_sessions': '1',
+		'inviter_use_all_sessions': '1',
+		'active_preset': 'soft',
+	},
+	'standard': {
+		'parser_posts_limit': '100',
+		'parser_comments_limit': '200',
+		'inviter_limit': '100',
+		'inviter_sleep': '15',
+		'inviter_per_account_limit': str(config.invite_per_account_limit),
+		'inviter_max_flood_wait': str(config.invite_max_flood_wait),
+		'parser_use_all_sessions': '1',
+		'inviter_use_all_sessions': '1',
+		'active_preset': 'standard',
+	},
+	'aggressive': {
+		'parser_posts_limit': '200',
+		'parser_comments_limit': '350',
+		'inviter_limit': '180',
+		'inviter_sleep': '8',
+		'inviter_per_account_limit': '45',
+		'inviter_max_flood_wait': '900',
+		'parser_use_all_sessions': '1',
+		'inviter_use_all_sessions': '1',
+		'active_preset': 'aggressive',
+	},
 }
 
 
@@ -244,9 +280,27 @@ def _setting_title(key):
 	return titles.get(key, key)
 
 
+def _preset_title(name):
+	return {
+		'soft': 'Мягкий',
+		'standard': 'Стандарт',
+		'aggressive': 'Агрессивный',
+	}.get(name, name)
+
+
+def _apply_preset(name):
+	data = PRESET_CONFIGS.get(name)
+	if not data:
+		return False
+	for k, v in data.items():
+		_set_setting(k, v)
+	return True
+
+
 def _settings_text():
 	return (
 		'⚙️ Настройки парсинга и инвайта\n'
+		f'• Активный пресет: <b>{_preset_title(_get_setting("active_preset"))}</b>\n'
 		f'• Парсинг: постов={_setting_int("parser_posts_limit")}, комментариев={_setting_int("parser_comments_limit")}, '
 		f'все аккаунты={"ВКЛ" if _setting_bool("parser_use_all_sessions") else "ВЫКЛ"}\n'
 		f'• Инвайт: лимит={_setting_int("inviter_limit")}, пауза={_setting_int("inviter_sleep")}с, '
@@ -257,6 +311,11 @@ def _settings_text():
 
 def _build_settings_menu():
 	keyboard = types.InlineKeyboardMarkup()
+	keyboard.add(
+		types.InlineKeyboardButton(text='🟢 Пресет: Мягкий', callback_data='settings_preset|soft'),
+		types.InlineKeyboardButton(text='🟡 Пресет: Стандарт', callback_data='settings_preset|standard'),
+	)
+	keyboard.add(types.InlineKeyboardButton(text='🔴 Пресет: Агрессивный', callback_data='settings_preset|aggressive'))
 	keyboard.add(
 		types.InlineKeyboardButton(text='✏️ Посты (парсинг)', callback_data='settings_edit|parser_posts_limit'),
 		types.InlineKeyboardButton(text='✏️ Комментарии (парсинг)', callback_data='settings_edit|parser_comments_limit'),
@@ -644,13 +703,29 @@ def podcategors(call):
 		return
 
 	if call.data == 'settings_menu':
-		bot.send_message(call.message.chat.id, _settings_text(), reply_markup=_build_settings_menu())
+		bot.send_message(call.message.chat.id, _settings_text(), parse_mode='HTML', reply_markup=_build_settings_menu())
 		return
 
 	if call.data == 'settings_reset':
 		for k, v in DEFAULT_APP_SETTINGS.items():
 			_set_setting(k, v)
 		bot.send_message(call.message.chat.id, '♻️ Настройки сброшены к значениям по умолчанию.', reply_markup=_build_settings_menu())
+		bot.send_message(call.message.chat.id, _settings_text(), parse_mode='HTML', reply_markup=_build_settings_menu())
+		return
+
+	if call.data.startswith('settings_preset|'):
+		name = call.data.split('|', 1)[1]
+		if not _apply_preset(name):
+			bot.send_message(call.message.chat.id, 'Неизвестный пресет.')
+			return
+		bot.send_message(
+			call.message.chat.id,
+			f'🚀 Применен пресет: <b>{_preset_title(name)}</b>\n'
+			'Лимиты и паузы обновлены.',
+			parse_mode='HTML',
+			reply_markup=_build_settings_menu()
+		)
+		bot.send_message(call.message.chat.id, _settings_text(), parse_mode='HTML', reply_markup=_build_settings_menu())
 		return
 
 	if call.data.startswith('settings_toggle|'):
