@@ -46,6 +46,7 @@ USER_STATE = {}
 RUNNING_TASKS = {}
 TASK_QUEUE = Queue()
 TASK_LOCK = threading.Lock()
+UPLOAD_QUEUE = Queue()
 DEFAULT_APP_SETTINGS = {
 	'parser_posts_limit': '100',
 	'parser_comments_limit': '200',
@@ -357,6 +358,29 @@ def _process_uploaded_session(chat_id, filename):
 		f'Всего аккаунтов: <b>{len(list_sessions())}</b>{warmup_text}',
 		parse_mode='HTML'
 	)
+
+
+def _upload_worker():
+	while True:
+		item = UPLOAD_QUEUE.get()
+		try:
+			_process_uploaded_session(item['chat_id'], item['filename'])
+		finally:
+			UPLOAD_QUEUE.task_done()
+
+
+def _ensure_upload_worker():
+	if getattr(_ensure_upload_worker, 'started', False):
+		return
+	t = threading.Thread(target=_upload_worker, daemon=True)
+	t.start()
+	_ensure_upload_worker.started = True
+
+
+def _enqueue_uploaded_session(chat_id, filename):
+	_ensure_upload_worker()
+	UPLOAD_QUEUE.put({'chat_id': chat_id, 'filename': filename})
+	return UPLOAD_QUEUE.qsize()
 
 
 def _save_targets_file(user_id, text_value, prefix):
@@ -926,12 +950,14 @@ def receive_session_file(message):
 	filename = os.path.basename(doc.file_name)
 	with open(filename, 'wb') as f:
 		f.write(data)
+	queue_pos = _enqueue_uploaded_session(message.chat.id, filename)
 	bot.send_message(
 		message.chat.id,
-		f'⏳ Файл <code>{filename}</code> загружен.\nПроверяю аккаунт в фоне...',
+		f'⏳ Файл <code>{filename}</code> загружен.\n'
+		f'Добавлен в очередь обработки: <b>~{queue_pos}</b>.\n'
+		'Можно отправлять следующие файлы — обработаю по очереди.',
 		parse_mode='HTML'
 	)
-	threading.Thread(target=_process_uploaded_session, args=(message.chat.id, filename), daemon=True).start()
 
 
 def parser_step_sources(message):
