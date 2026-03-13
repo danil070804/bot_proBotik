@@ -18,6 +18,7 @@ from telethon.tl.functions.channels import JoinChannelRequest
 from config import API_ID, API_HASH, invite_per_account_limit, invite_max_flood_wait
 from db import (
     get_usernames_for_invite,
+    get_usernames_for_invite_all,
     mark_invite_result,
     is_source_allowed,
     is_username_allowed,
@@ -111,14 +112,16 @@ async def _get_or_create_client(session, clients, proxy, invite_target):
 
 
 async def run_inviter(
-    source_target, sources_file, invite_target, limit, sleep_seconds, session_index, use_all_sessions, per_account_limit, max_flood_wait, progress_file
+    source_target, sources_file, invite_target, limit, sleep_seconds, session_index, use_all_sessions, per_account_limit, max_flood_wait, progress_file, all_parsed
 ):
     if not API_ID or not API_HASH:
         raise RuntimeError('Set TG_API_ID and TG_API_HASH env vars')
     invite_target = _normalize_target(invite_target)
     sources = _read_sources(source_target, sources_file)
-    if not sources:
+    if not all_parsed and not sources:
         raise RuntimeError('Set --source-target or --sources-file')
+    if all_parsed:
+        sources = ['__all__']
 
     sessions = get_sessions()
     if not sessions:
@@ -160,9 +163,14 @@ async def run_inviter(
             progress['message'] = f'Источник заблокирован фильтром: {src}'
             _write_progress(progress_file, progress)
             continue
-        rows = get_usernames_for_invite(src, invite_target, total_limit_per_source)
-        rows = [(u, uid) for (u, uid) in rows if is_username_allowed(u)]
-        progress['filtered_users'] += max(0, total_limit_per_source - len(rows))
+        if src == '__all__':
+            all_rows = get_usernames_for_invite_all(invite_target, total_limit_per_source)
+            rows = [(source, u, uid) for (source, u, uid) in all_rows if is_source_allowed(source) and is_username_allowed(u)]
+            progress['filtered_users'] += max(0, total_limit_per_source - len(rows))
+        else:
+            rows_raw = get_usernames_for_invite(src, invite_target, total_limit_per_source)
+            rows = [(src, u, uid) for (u, uid) in rows_raw if is_username_allowed(u)]
+            progress['filtered_users'] += max(0, total_limit_per_source - len(rows))
         if not rows:
             logger.info(f'Нет пользователей для инвайта из {src}')
             progress['sources_done'] += 1
@@ -173,14 +181,14 @@ async def run_inviter(
         progress['message'] = f'Инвайт из {src}'
         _write_progress(progress_file, progress)
 
-        for username, user_id in rows:
+        for source_row, username, user_id in rows:
             idx, session = _pick_next_session(selected_sessions, rr_index)
             if session is None:
                 min_wait = min([get_account_cooldown_remaining(s) for s in selected_sessions] or [10])
                 await asyncio.sleep(max(3, min_wait))
                 idx, session = _pick_next_session(selected_sessions, 0)
                 if session is None:
-                    mark_invite_result(src, invite_target, username, user_id, 'cooldown_skip', 'All accounts cooldown')
+                    mark_invite_result(source_row, invite_target, username, user_id, 'cooldown_skip', 'All accounts cooldown')
                     progress['error'] += 1
                     progress['processed'] += 1
                     progress['last_user'] = username
@@ -195,7 +203,7 @@ async def run_inviter(
             try:
                 client = await _get_or_create_client(session, clients, proxy, invite_target)
                 await invite_one(client, invite_target, username)
-                mark_invite_result(src, invite_target, username, user_id, 'invited', '')
+                mark_invite_result(source_row, invite_target, username, user_id, 'invited', '')
                 stats['success'] += 1
                 stats['errors'] = max(0, stats['errors'] - 1)
                 stats['extra_sleep'] = max(0, stats['extra_sleep'] - 1)
@@ -204,21 +212,21 @@ async def run_inviter(
                 progress['last_user'] = username
                 progress['active_session'] = session
             except UserAlreadyParticipantError:
-                mark_invite_result(src, invite_target, username, user_id, 'already', '')
+                mark_invite_result(source_row, invite_target, username, user_id, 'already', '')
                 progress['already'] += 1
                 progress['processed'] += 1
                 progress['last_user'] = username
                 progress['active_session'] = session
             except UserPrivacyRestrictedError:
                 msg = f'Пользователь @{username} не добавлен: запретил приглашения'
-                mark_invite_result(src, invite_target, username, user_id, 'privacy', msg)
+                mark_invite_result(source_row, invite_target, username, user_id, 'privacy', msg)
                 progress['privacy'] += 1
                 progress['processed'] += 1
                 progress['last_user'] = username
                 progress['active_session'] = session
             except PeerFloodError:
                 set_account_cooldown(session, max_flood_wait * 2, 'peer-flood')
-                mark_invite_result(src, invite_target, username, user_id, 'peer_flood', 'PeerFloodError')
+                mark_invite_result(source_row, invite_target, username, user_id, 'peer_flood', 'PeerFloodError')
                 stats['errors'] += 2
                 stats['extra_sleep'] += 4
                 progress['peer_flood'] += 1
@@ -228,7 +236,7 @@ async def run_inviter(
             except FloodWaitError as e:
                 wait_s = int(e.seconds)
                 set_account_cooldown(session, wait_s, 'flood-wait')
-                mark_invite_result(src, invite_target, username, user_id, 'flood_wait', str(wait_s))
+                mark_invite_result(source_row, invite_target, username, user_id, 'flood_wait', str(wait_s))
                 stats['errors'] += 1
                 stats['extra_sleep'] += 2
                 progress['flood_wait'] += 1
@@ -238,7 +246,7 @@ async def run_inviter(
                 if wait_s <= max_flood_wait:
                     await asyncio.sleep(wait_s)
             except Exception as e:
-                mark_invite_result(src, invite_target, username, user_id, 'error', str(e))
+                mark_invite_result(source_row, invite_target, username, user_id, 'error', str(e))
                 stats['errors'] += 1
                 stats['extra_sleep'] += 1
                 progress['error'] += 1
@@ -277,6 +285,7 @@ if __name__ == '__main__':
     p.add_argument('--per-account-limit', type=int, default=invite_per_account_limit, help='Max successful invites per account')
     p.add_argument('--max-flood-wait', type=int, default=invite_max_flood_wait, help='Stop account if FloodWait is higher')
     p.add_argument('--progress-file', default='', help='Path to JSON progress file')
+    p.add_argument('--all-parsed', action='store_true', help='Invite from full parsed base (all sources)')
     args = p.parse_args()
     asyncio.run(
         run_inviter(
@@ -290,5 +299,6 @@ if __name__ == '__main__':
             per_account_limit=max(1, args.per_account_limit),
             max_flood_wait=max(1, args.max_flood_wait),
             progress_file=args.progress_file,
+            all_parsed=args.all_parsed,
         )
     )

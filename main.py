@@ -358,6 +358,32 @@ def _has_active_flow(user_id):
 	return bool(state.get('flow'))
 
 
+def _ensure_sessions_or_warn(chat_id, message_id=None):
+	count = len(list_sessions())
+	if count > 0:
+		return True
+	text = (
+		'⛔ <b>Невозможно запустить сценарий</b>\n'
+		'Сначала добавьте хотя бы <b>1 .session</b> аккаунт в разделе «Аккаунты • Session».'
+	)
+	if message_id:
+		_render_inline(chat_id, message_id, text, parse_mode='HTML', reply_markup=build_new_menu())
+	else:
+		bot.send_message(chat_id, text, parse_mode='HTML', reply_markup=build_new_menu())
+	return False
+
+
+def _prompt_step(chat_id, state, text, handler):
+	panel_id = state.get('panel_msg_id')
+	state['panel_msg_id'] = _render_inline(chat_id, panel_id, text, parse_mode='HTML', reply_markup=_step_keyboard())
+	USER_STATE[chat_id] = state
+	if hasattr(bot, 'register_next_step_handler_by_chat_id'):
+		bot.register_next_step_handler_by_chat_id(chat_id, handler)
+	else:
+		msg = bot.send_message(chat_id, '✍️ Введи ответ следующим сообщением:', reply_markup=_step_keyboard())
+		bot.register_next_step_handler(msg, handler)
+
+
 def _get_setting(key):
 	return get_app_setting(key, DEFAULT_APP_SETTINGS.get(key, ''))
 
@@ -628,17 +654,18 @@ def parser_step_sources(message):
 		USER_STATE.pop(message.chat.id, None)
 		bot.send_message(message.chat.id, '❌ Действие отменено.', reply_markup=build_new_menu())
 		return
-	USER_STATE[message.chat.id] = {'flow': 'parser', 'sources': message.text, 'stage': 'posts'}
+	state['sources'] = message.text
+	state['stage'] = 'posts'
+	USER_STATE[message.chat.id] = state
 	default_posts = _setting_int('parser_posts_limit')
-	msg = bot.send_message(
+	_prompt_step(
 		message.chat.id,
+		state,
 		f'🔎 <b>Парсинг • Шаг 2/3</b>\n'
 		f'Выбери глубину анализа по постам.\n'
 		f'Рекомендация: <b>{default_posts}</b>.',
-		parse_mode='HTML',
-		reply_markup=_step_keyboard()
+		parser_step_posts
 	)
-	bot.register_next_step_handler(msg, parser_step_posts)
 
 
 def parser_step_posts(message):
@@ -659,15 +686,14 @@ def parser_step_posts(message):
 		state['posts_limit'] = _setting_int('parser_posts_limit')
 	state['stage'] = 'comments'
 	USER_STATE[message.chat.id] = state
-	msg = bot.send_message(
+	_prompt_step(
 		message.chat.id,
+		state,
 		f'🔎 <b>Парсинг • Шаг 3/3</b>\n'
 		f'Укажи лимит комментариев на источник.\n'
 		f'Рекомендация: <b>{_setting_int("parser_comments_limit")}</b>.',
-		parse_mode='HTML',
-		reply_markup=_step_keyboard()
+		parser_step_comments
 	)
-	bot.register_next_step_handler(msg, parser_step_comments)
 
 
 def parser_step_comments(message):
@@ -702,8 +728,9 @@ def parser_step_comments(message):
 	command += ['--progress-file', progress_file]
 	queue_pos = _enqueue_process(message.chat.id, f'parser ({sources_count} sources)', command, progress_file=progress_file)
 	USER_STATE.pop(message.chat.id, None)
-	bot.send_message(
+	_render_inline(
 		message.chat.id,
+		state.get('panel_msg_id'),
 		f'✅ <b>Парсинг поставлен в очередь</b>\n'
 		f'• Источников: <b>{sources_count}</b>\n'
 		f'• Позиция: <b>~{queue_pos}</b>\n'
@@ -711,28 +738,6 @@ def parser_step_comments(message):
 		parse_mode='HTML',
 		reply_markup=build_new_menu()
 	)
-
-
-def inviter_step_sources(message):
-	if not _is_admin(message.chat.id):
-		_deny_access(message.chat.id)
-		return
-	state = USER_STATE.get(message.chat.id, {})
-	if state.get('flow') != 'inviter':
-		bot.send_message(message.chat.id, '⚠️ Сейчас неактивен сценарий инвайта. Нажми кнопку «Инвайт • Добавление» заново.', reply_markup=build_new_menu())
-		return
-	if _is_cancel(message.text):
-		USER_STATE.pop(message.chat.id, None)
-		bot.send_message(message.chat.id, '❌ Действие отменено.', reply_markup=build_new_menu())
-		return
-	USER_STATE[message.chat.id] = {'flow': 'inviter', 'sources': message.text, 'stage': 'target'}
-	msg = bot.send_message(
-		message.chat.id,
-		'📨 <b>Инвайт • Шаг 2/4</b>\nУкажи цель инвайта: <code>@chat</code> или <code>@channel</code>.',
-		parse_mode='HTML',
-		reply_markup=_step_keyboard()
-	)
-	bot.register_next_step_handler(msg, inviter_step_target)
 
 
 def inviter_step_target(message):
@@ -754,15 +759,14 @@ def inviter_step_target(message):
 	state['invite_target'] = target
 	state['stage'] = 'limit'
 	USER_STATE[message.chat.id] = state
-	msg = bot.send_message(
+	_prompt_step(
 		message.chat.id,
-		f'📨 <b>Инвайт • Шаг 3/4</b>\n'
+		state,
+		f'📨 <b>Инвайт • Шаг 2/3</b>\n'
 		f'Укажи лимит пользователей за один запуск.\n'
 		f'Рекомендация: <b>{_setting_int("inviter_limit")}</b>.',
-		parse_mode='HTML',
-		reply_markup=_step_keyboard()
+		inviter_step_limit
 	)
-	bot.register_next_step_handler(msg, inviter_step_limit)
 
 
 def inviter_step_limit(message):
@@ -783,15 +787,14 @@ def inviter_step_limit(message):
 		state['limit'] = _setting_int('inviter_limit')
 	state['stage'] = 'sleep'
 	USER_STATE[message.chat.id] = state
-	msg = bot.send_message(
+	_prompt_step(
 		message.chat.id,
-		f'📨 <b>Инвайт • Шаг 4/4</b>\n'
+		state,
+		f'📨 <b>Инвайт • Шаг 3/3</b>\n'
 		f'Укажи паузу между инвайтами в секундах.\n'
 		f'Рекомендация: <b>{_setting_int("inviter_sleep")}</b>.',
-		parse_mode='HTML',
-		reply_markup=_step_keyboard()
+		inviter_step_sleep
 	)
-	bot.register_next_step_handler(msg, inviter_step_sleep)
 
 
 def inviter_step_sleep(message):
@@ -810,13 +813,9 @@ def inviter_step_sleep(message):
 		sleep_sec = int(message.text.strip())
 	except (TypeError, ValueError):
 		sleep_sec = _setting_int('inviter_sleep')
-	file_name, sources_count = _save_targets_file(message.chat.id, state.get('sources', ''), 'inviter_sources')
-	if sources_count == 0:
-		bot.send_message(message.chat.id, '⚠️ Не нашёл источники. Запусти инвайт заново.', reply_markup=build_new_menu())
-		return
 	command = [
 		sys.executable, 'inviter.py',
-		'--sources-file', file_name,
+		'--all-parsed',
 		'--invite-target', state.get('invite_target', ''),
 		'--limit', str(state.get('limit', _setting_int('inviter_limit'))),
 		'--sleep', str(sleep_sec),
@@ -827,12 +826,13 @@ def inviter_step_sleep(message):
 		command.append('--use-all-sessions')
 	progress_file = _progress_file(message.chat.id, 'inviter')
 	command += ['--progress-file', progress_file]
-	queue_pos = _enqueue_process(message.chat.id, f'inviter ({sources_count} sources)', command, progress_file=progress_file)
+	queue_pos = _enqueue_process(message.chat.id, 'inviter (all parsed)', command, progress_file=progress_file)
 	USER_STATE.pop(message.chat.id, None)
-	bot.send_message(
+	_render_inline(
 		message.chat.id,
+		state.get('panel_msg_id'),
 		f'✅ <b>Инвайт поставлен в очередь</b>\n'
-		f'• Источников: <b>{sources_count}</b>\n'
+		'• Режим: <b>вся база парсинга</b>\n'
 		f'• Позиция: <b>~{queue_pos}</b>\n'
 		'При старте покажу live-отчет по добавлениям.',
 		parse_mode='HTML',
@@ -1012,19 +1012,21 @@ def podcategors(call):
 				reply_markup=_step_keyboard()
 			)
 			return
-		USER_STATE[call.message.chat.id] = {'flow': 'parser', 'stage': 'sources'}
-		msg = bot.send_message(
+		if not _ensure_sessions_or_warn(call.message.chat.id, call.message.message_id):
+			return
+		state = {'flow': 'parser', 'stage': 'sources', 'panel_msg_id': call.message.message_id}
+		USER_STATE[call.message.chat.id] = state
+		_prompt_step(
 			call.message.chat.id,
+			state,
 			'🔎 <b>Парсинг аудитории</b>\n'
 			'Шаг 1/3: отправь источники (через запятую или с новой строки).\n\n'
 			'Пример:\n<code>@chat1\n@chat2</code>\n\n'
 			f'Текущие настройки: постов={_setting_int("parser_posts_limit")}, комментариев={_setting_int("parser_comments_limit")}, '
 			f'все аккаунты={"ВКЛ" if _setting_bool("parser_use_all_sessions") else "ВЫКЛ"}.\n'
 			'После этого я попрошу лимиты и поставлю задачу в очередь.',
-			parse_mode='HTML',
-			reply_markup=_step_keyboard()
+			parser_step_sources
 		)
-		bot.register_next_step_handler(msg, parser_step_sources)
 		return
 
 	if call.data == 'inviter_start':
@@ -1039,20 +1041,22 @@ def podcategors(call):
 				reply_markup=_step_keyboard()
 			)
 			return
-		USER_STATE[call.message.chat.id] = {'flow': 'inviter', 'stage': 'sources'}
-		msg = bot.send_message(
+		if not _ensure_sessions_or_warn(call.message.chat.id, call.message.message_id):
+			return
+		state = {'flow': 'inviter', 'stage': 'target', 'panel_msg_id': call.message.message_id}
+		USER_STATE[call.message.chat.id] = state
+		_prompt_step(
 			call.message.chat.id,
+			state,
 			'📨 <b>Инвайт пользователей</b>\n'
-			'Шаг 1/4: отправь источники, из которых брать пользователей.\n\n'
-			'Пример:\n<code>@source_chat_1\n@source_chat_2</code>\n\n'
+			'Шаг 1/3: укажи цель инвайта: <code>@chat</code> или <code>@channel</code>.\n\n'
+			'Источник пользователей: <b>вся база пропарсенных</b>.\n\n'
 			f'Текущие настройки: лимит={_setting_int("inviter_limit")}, пауза={_setting_int("inviter_sleep")}с, '
 			f'на аккаунт={_setting_int("inviter_per_account_limit")}, flood={_setting_int("inviter_max_flood_wait")}с, '
 			f'все аккаунты={"ВКЛ" if _setting_bool("inviter_use_all_sessions") else "ВЫКЛ"}.\n'
-			'Дальше я попрошу цель инвайта и лимиты.',
-			parse_mode='HTML',
-			reply_markup=_step_keyboard()
+			'Дальше я попрошу лимит и паузу.',
+			inviter_step_target
 		)
-		bot.register_next_step_handler(msg, inviter_step_sources)
 		return
 
 	if call.data == 'task_status':

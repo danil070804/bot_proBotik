@@ -256,6 +256,48 @@ def get_usernames_for_invite(source_target, invite_target, limit):
         return rows
 
 
+def get_usernames_for_invite_all(invite_target, limit):
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        if IS_POSTGRES:
+            cursor.execute(
+                'WITH src AS ('
+                '  SELECT p.target AS source, p.username, p.user_id, p.created_at FROM parsed_usernames p '
+                '  UNION '
+                '  SELECT c.target AS source, c.username, c.user_id, c.created_at FROM parsed_comments c'
+                ') '
+                'SELECT s.source, s.username, MAX(s.user_id) '
+                'FROM src s '
+                'WHERE NOT EXISTS ('
+                '  SELECT 1 FROM invited_users i WHERE i.invite_target = %s AND i.username = s.username'
+                ') '
+                'GROUP BY s.source, s.username '
+                'ORDER BY MIN(s.created_at) ASC '
+                'LIMIT %s',
+                (invite_target, limit),
+            )
+        else:
+            cursor.execute(
+                'WITH src AS ('
+                '  SELECT p.target AS source, p.username AS username, p.user_id AS user_id, p.created_at AS created_at FROM parsed_usernames p '
+                '  UNION '
+                '  SELECT c.target AS source, c.username AS username, c.user_id AS user_id, c.created_at AS created_at FROM parsed_comments c'
+                ') '
+                'SELECT s.source, s.username, MAX(s.user_id) '
+                'FROM src s '
+                'WHERE NOT EXISTS ('
+                '  SELECT 1 FROM invited_users i WHERE i.invite_target = ? AND i.username = s.username'
+                ') '
+                'GROUP BY s.source, s.username '
+                'ORDER BY MIN(s.created_at) ASC '
+                'LIMIT ?',
+                (invite_target, limit),
+            )
+        rows = cursor.fetchall()
+        cursor.close()
+        return rows
+
+
 def mark_invite_result(source_target, invite_target, username, user_id, status, error=''):
     username = (username or '').lstrip('@').lower()
     with get_connection() as conn:
