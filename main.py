@@ -2,6 +2,7 @@ from decimal import *
 import telebot
 import datetime
 from telebot import types, apihelper
+from telebot.apihelper import ApiTelegramException
 import sqlite3
 import random, string
 import time
@@ -1083,4 +1084,32 @@ def new_data(message):
 	else:
 		bot.send_message(message.chat.id, 'Отменили',parse_mode='HTML', reply_markup=keyboard)
 
-bot.polling(True)
+def run_bot_polling():
+	# Reset webhook mode to avoid clashes between webhook and long polling.
+	try:
+		bot.remove_webhook()
+	except Exception:
+		pass
+
+	while True:
+		try:
+			bot.infinity_polling(
+				timeout=20,
+				long_polling_timeout=20,
+				skip_pending=True,
+				allowed_updates=['message', 'callback_query'],
+			)
+		except ApiTelegramException as e:
+			# 409 = another process is already calling getUpdates.
+			if getattr(e, 'error_code', None) == 409:
+				print('Telegram 409 conflict: another bot instance is running. Retry in 8s...')
+				time.sleep(8)
+				continue
+			print(f'Telegram API error: {e}. Retry in 5s...')
+			time.sleep(5)
+		except Exception as e:
+			print(f'Polling crashed: {e}. Retry in 5s...')
+			time.sleep(5)
+
+
+run_bot_polling()
