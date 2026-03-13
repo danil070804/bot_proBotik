@@ -1,5 +1,6 @@
 import argparse
 import asyncio
+import json
 
 from loguru import logger
 from telethon import TelegramClient
@@ -12,6 +13,13 @@ from functions import get_sessions, get_proxy
 
 
 logger.add('logging.log', rotation='1 MB', encoding='utf-8')
+
+
+def _write_progress(progress_file, data):
+    if not progress_file:
+        return
+    with open(progress_file, 'w', encoding='utf-8') as f:
+        json.dump(data, f, ensure_ascii=False)
 
 
 def _normalize_target(target):
@@ -98,7 +106,7 @@ async def parse_target_with_client(client, target, posts_limit, comments_limit):
     return users, comments
 
 
-async def run_parser(target, targets_file, posts_limit, comments_limit, session_index, use_all_sessions):
+async def run_parser(target, targets_file, posts_limit, comments_limit, session_index, use_all_sessions, progress_file):
     if not API_ID or not API_HASH:
         raise RuntimeError('Set TG_API_ID and TG_API_HASH env vars')
     targets = _read_targets(target, targets_file)
@@ -112,9 +120,24 @@ async def run_parser(target, targets_file, posts_limit, comments_limit, session_
     proxy = get_proxy()
     selected_sessions = sessions if use_all_sessions else [sessions[session_index]]
 
+    progress = {
+        'mode': 'parser',
+        'status': 'running',
+        'sources_total': len(targets),
+        'sources_done': 0,
+        'users_parsed': 0,
+        'comments_parsed': 0,
+        'current_source': '',
+        'message': 'Parser started',
+    }
+    _write_progress(progress_file, progress)
+
     total_users = 0
     total_comments = 0
     for idx, src in enumerate(targets):
+        progress['current_source'] = src
+        progress['message'] = f'Parsing {src}'
+        _write_progress(progress_file, progress)
         sess = selected_sessions[idx % len(selected_sessions)]
         client = TelegramClient(sess, API_ID, API_HASH, proxy=proxy)
         await client.start()
@@ -122,7 +145,15 @@ async def run_parser(target, targets_file, posts_limit, comments_limit, session_
         await client.disconnect()
         total_users += users
         total_comments += comments
+        progress['sources_done'] += 1
+        progress['users_parsed'] = total_users
+        progress['comments_parsed'] = total_comments
+        progress['message'] = f'Done {src}'
+        _write_progress(progress_file, progress)
 
+    progress['status'] = 'finished'
+    progress['message'] = 'Parser finished'
+    _write_progress(progress_file, progress)
     logger.info(f'Парсинг завершен: users={total_users}, comments={total_comments}, sources={len(targets)}')
 
 
@@ -134,6 +165,7 @@ if __name__ == '__main__':
     p.add_argument('--comments-limit', type=int, default=200)
     p.add_argument('--session-index', type=int, default=0, help='Use one account by index')
     p.add_argument('--use-all-sessions', action='store_true', help='Distribute parsing across all added accounts')
+    p.add_argument('--progress-file', default='', help='Path to JSON progress file')
     args = p.parse_args()
     asyncio.run(
         run_parser(
@@ -143,5 +175,6 @@ if __name__ == '__main__':
             comments_limit=args.comments_limit,
             session_index=args.session_index,
             use_all_sessions=args.use_all_sessions,
+            progress_file=args.progress_file,
         )
     )

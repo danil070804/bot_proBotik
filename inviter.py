@@ -1,5 +1,6 @@
 import argparse
 import asyncio
+import json
 
 from loguru import logger
 from telethon import TelegramClient
@@ -20,6 +21,13 @@ from functions import get_proxy, get_sessions
 
 
 logger.add('logging.log', rotation='1 MB', encoding='utf-8')
+
+
+def _write_progress(progress_file, data):
+    if not progress_file:
+        return
+    with open(progress_file, 'w', encoding='utf-8') as f:
+        json.dump(data, f, ensure_ascii=False)
 
 
 def _normalize_target(target):
@@ -75,7 +83,9 @@ async def ensure_join_target(client, invite_target):
         logger.warning(f'Не удалось вступить в целевой чат {invite_target}: {e}')
 
 
-async def invite_batch_with_session(session, source_target, invite_target, rows, sleep_seconds, proxy, per_account_limit, max_flood_wait):
+async def invite_batch_with_session(
+    session, source_target, invite_target, rows, sleep_seconds, proxy, per_account_limit, max_flood_wait, progress, progress_lock, progress_file
+):
     client = TelegramClient(session, API_ID, API_HASH, proxy=proxy)
     await client.start()
     await ensure_join_target(client, invite_target)
@@ -91,24 +101,54 @@ async def invite_batch_with_session(session, source_target, invite_target, rows,
             mark_invite_result(source_target, invite_target, username, user_id, 'invited', '')
             logger.info(f'Добавлен: @{username}')
             invited_count += 1
+            async with progress_lock:
+                progress['invited'] += 1
+                progress['processed'] += 1
+                progress['last_user'] = username
+                _write_progress(progress_file, progress)
         except UserAlreadyParticipantError:
             mark_invite_result(source_target, invite_target, username, user_id, 'already', '')
+            async with progress_lock:
+                progress['already'] += 1
+                progress['processed'] += 1
+                progress['last_user'] = username
+                _write_progress(progress_file, progress)
         except UserPrivacyRestrictedError:
             msg = f'Пользователь @{username} не добавлен: запретил приглашения'
             mark_invite_result(source_target, invite_target, username, user_id, 'privacy', msg)
             logger.warning(msg)
+            async with progress_lock:
+                progress['privacy'] += 1
+                progress['processed'] += 1
+                progress['last_user'] = username
+                _write_progress(progress_file, progress)
         except PeerFloodError:
             mark_invite_result(source_target, invite_target, username, user_id, 'peer_flood', 'PeerFloodError')
             logger.error('PeerFloodError: остановка инвайта для защиты аккаунта')
+            async with progress_lock:
+                progress['peer_flood'] += 1
+                progress['processed'] += 1
+                progress['last_user'] = username
+                _write_progress(progress_file, progress)
             break
         except FloodWaitError as e:
             mark_invite_result(source_target, invite_target, username, user_id, 'flood_wait', str(e.seconds))
+            async with progress_lock:
+                progress['flood_wait'] += 1
+                progress['processed'] += 1
+                progress['last_user'] = username
+                _write_progress(progress_file, progress)
             if int(e.seconds) > max_flood_wait:
                 logger.error(f'FloodWait {e.seconds}s > лимита {max_flood_wait}s, остановка аккаунта {session}')
                 break
             await asyncio.sleep(int(e.seconds))
         except Exception as e:
             mark_invite_result(source_target, invite_target, username, user_id, 'error', str(e))
+            async with progress_lock:
+                progress['error'] += 1
+                progress['processed'] += 1
+                progress['last_user'] = username
+                _write_progress(progress_file, progress)
         await asyncio.sleep(max(0, sleep_seconds))
 
     await client.disconnect()
@@ -123,7 +163,9 @@ def _split_rows(rows, buckets):
     return chunks
 
 
-async def run_inviter(source_target, sources_file, invite_target, limit, sleep_seconds, session_index, use_all_sessions, per_account_limit, max_flood_wait):
+async def run_inviter(
+    source_target, sources_file, invite_target, limit, sleep_seconds, session_index, use_all_sessions, per_account_limit, max_flood_wait, progress_file
+):
     if not API_ID or not API_HASH:
         raise RuntimeError('Set TG_API_ID and TG_API_HASH env vars')
     invite_target = _normalize_target(invite_target)
@@ -140,12 +182,39 @@ async def run_inviter(source_target, sources_file, invite_target, limit, sleep_s
     proxy = get_proxy()
     selected_sessions = sessions if use_all_sessions else [sessions[session_index]]
     total_limit_per_source = max(1, limit)
+    progress = {
+        'mode': 'inviter',
+        'status': 'running',
+        'sources_total': len(sources),
+        'sources_done': 0,
+        'invite_target': invite_target,
+        'total_candidates': 0,
+        'processed': 0,
+        'invited': 0,
+        'already': 0,
+        'privacy': 0,
+        'flood_wait': 0,
+        'peer_flood': 0,
+        'error': 0,
+        'last_user': '',
+        'message': 'Inviter started',
+    }
+    progress_lock = asyncio.Lock()
+    _write_progress(progress_file, progress)
 
     for src in sources:
         rows = get_usernames_for_invite(src, invite_target, total_limit_per_source)
         if not rows:
             logger.info(f'Нет пользователей для инвайта из {src}')
+            async with progress_lock:
+                progress['sources_done'] += 1
+                progress['message'] = f'No users in {src}'
+                _write_progress(progress_file, progress)
             continue
+        async with progress_lock:
+            progress['total_candidates'] += len(rows)
+            progress['message'] = f'Inviting from {src}'
+            _write_progress(progress_file, progress)
         chunks = _split_rows(rows, len(selected_sessions))
         tasks = []
         for idx, batch in enumerate(chunks):
@@ -162,11 +231,21 @@ async def run_inviter(source_target, sources_file, invite_target, limit, sleep_s
                         proxy,
                         per_account_limit,
                         max_flood_wait,
+                        progress,
+                        progress_lock,
+                        progress_file,
                     )
                 )
             )
         if tasks:
             await asyncio.gather(*tasks)
+        async with progress_lock:
+            progress['sources_done'] += 1
+            progress['message'] = f'Done source {src}'
+            _write_progress(progress_file, progress)
+    progress['status'] = 'finished'
+    progress['message'] = 'Inviter finished'
+    _write_progress(progress_file, progress)
     logger.info('Инвайт завершен')
 
 
@@ -181,6 +260,7 @@ if __name__ == '__main__':
     p.add_argument('--use-all-sessions', action='store_true', help='Distribute invites across all added accounts')
     p.add_argument('--per-account-limit', type=int, default=invite_per_account_limit, help='Max successful invites per account')
     p.add_argument('--max-flood-wait', type=int, default=invite_max_flood_wait, help='Stop account if FloodWait is higher')
+    p.add_argument('--progress-file', default='', help='Path to JSON progress file')
     args = p.parse_args()
     asyncio.run(
         run_inviter(
@@ -193,5 +273,6 @@ if __name__ == '__main__':
             use_all_sessions=args.use_all_sessions,
             per_account_limit=max(1, args.per_account_limit),
             max_flood_wait=max(1, args.max_flood_wait),
+            progress_file=args.progress_file,
         )
     )

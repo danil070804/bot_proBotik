@@ -73,6 +73,61 @@ def _save_targets_file(user_id, text_value, prefix):
 	return filename, len(rows)
 
 
+def _progress_file(user_id, task_type):
+	return f'progress_{task_type}_{user_id}_{int(time.time())}.json'
+
+
+def _format_progress_text(item, progress):
+	mode = progress.get('mode', '')
+	if mode == 'parser':
+		return (
+			f'🔎 Парсинг в процессе\n'
+			f'Источник: {progress.get("current_source", "-")}\n'
+			f'Источники: {progress.get("sources_done", 0)}/{progress.get("sources_total", 0)}\n'
+			f'Пользователей: {progress.get("users_parsed", 0)}\n'
+			f'Комментариев: {progress.get("comments_parsed", 0)}'
+		)
+	if mode == 'inviter':
+		return (
+			f'📨 Инвайт в процессе\n'
+			f'Цель: {progress.get("invite_target", "-")}\n'
+			f'Источники: {progress.get("sources_done", 0)}/{progress.get("sources_total", 0)}\n'
+			f'Кандидатов: {progress.get("total_candidates", 0)}\n'
+			f'Обработано: {progress.get("processed", 0)}\n'
+			f'✅ Добавлено: {progress.get("invited", 0)} | ⛔ privacy: {progress.get("privacy", 0)}\n'
+			f'⚠️ already: {progress.get("already", 0)} | errors: {progress.get("error", 0)}'
+		)
+	return f'Задача: {item["title"]} выполняется...'
+
+
+def _start_progress_monitor(item):
+	progress_file = item.get('progress_file')
+	if not progress_file:
+		return
+
+	def _watch():
+		last_snapshot = ''
+		while item.get('status') == 'running':
+			try:
+				if os.path.exists(progress_file):
+					with open(progress_file, 'r', encoding='utf-8') as f:
+						progress = json.load(f)
+					text = _format_progress_text(item, progress)
+					if text != last_snapshot:
+						bot.send_message(item['user_id'], text)
+						last_snapshot = text
+			except Exception:
+				pass
+			time.sleep(4)
+		try:
+			if os.path.exists(progress_file):
+				os.remove(progress_file)
+		except Exception:
+			pass
+
+	threading.Thread(target=_watch, daemon=True).start()
+
+
 def _queue_worker():
 	while True:
 		item = TASK_QUEUE.get()
@@ -85,6 +140,7 @@ def _queue_worker():
 			bot.send_message(item['user_id'], f'▶️ Запущено: {item["title"]} (PID {proc.pid})')
 		except Exception:
 			pass
+		_start_progress_monitor(item)
 		code = proc.wait()
 		with TASK_LOCK:
 			item['status'] = f'finished ({code})'
@@ -103,7 +159,7 @@ def _ensure_worker():
 	_ensure_worker.started = True
 
 
-def _enqueue_process(user_id, title, command):
+def _enqueue_process(user_id, title, command, progress_file=''):
 	_ensure_worker()
 	item = {
 		'user_id': user_id,
@@ -112,6 +168,7 @@ def _enqueue_process(user_id, title, command):
 		'status': 'queued',
 		'pid': None,
 		'proc': None,
+		'progress_file': progress_file,
 	}
 	with TASK_LOCK:
 		RUNNING_TASKS.setdefault(user_id, []).append(item)
@@ -317,7 +374,9 @@ def parser_step_comments(message):
 		'--comments-limit', str(comments_limit),
 		'--use-all-sessions'
 	]
-	queue_pos = _enqueue_process(message.chat.id, f'parser ({sources_count} sources)', command)
+	progress_file = _progress_file(message.chat.id, 'parser')
+	command += ['--progress-file', progress_file]
+	queue_pos = _enqueue_process(message.chat.id, f'parser ({sources_count} sources)', command, progress_file=progress_file)
 	USER_STATE.pop(message.chat.id, None)
 	bot.send_message(message.chat.id, f'✅ Парсинг добавлен в очередь.\nИсточников: {sources_count}\nПозиция: ~{queue_pos}', reply_markup=build_new_menu())
 
@@ -387,7 +446,9 @@ def inviter_step_sleep(message):
 		'--max-flood-wait', str(config.invite_max_flood_wait),
 		'--use-all-sessions'
 	]
-	queue_pos = _enqueue_process(message.chat.id, f'inviter ({sources_count} sources)', command)
+	progress_file = _progress_file(message.chat.id, 'inviter')
+	command += ['--progress-file', progress_file]
+	queue_pos = _enqueue_process(message.chat.id, f'inviter ({sources_count} sources)', command, progress_file=progress_file)
 	USER_STATE.pop(message.chat.id, None)
 	bot.send_message(message.chat.id, f'✅ Инвайт добавлен в очередь.\nИсточников: {sources_count}\nПозиция: ~{queue_pos}', reply_markup=build_new_menu())
 
@@ -472,7 +533,19 @@ def podcategors(call):
 			status = item.get('status', 'queued')
 			pid = item.get('pid')
 			pid_text = f'PID {pid}' if pid else 'PID -'
-			lines.append(f'{idx}. {item["title"]} - {status} - {pid_text}')
+			extra = ''
+			pf = item.get('progress_file')
+			if pf and os.path.exists(pf):
+				try:
+					with open(pf, 'r', encoding='utf-8') as f:
+						p = json.load(f)
+					if p.get('mode') == 'parser':
+						extra = f' | parsed={p.get("users_parsed", 0)} users'
+					elif p.get('mode') == 'inviter':
+						extra = f' | invited={p.get("invited", 0)} processed={p.get("processed", 0)}'
+				except Exception:
+					extra = ''
+			lines.append(f'{idx}. {item["title"]} - {status} - {pid_text}{extra}')
 		lines.append(f'Очередь (глобально): {TASK_QUEUE.qsize()}')
 		bot.send_message(call.message.chat.id, '📊 Статус задач:\n' + '\n'.join(lines))
 		return
@@ -535,7 +608,7 @@ def podcategors(call):
 	if call.data == 'help_new':
 		bot.send_message(
 			call.message.chat.id,
-			'🤝 Как пользоваться:\n1) Добавь .session аккаунты в разделе «Аккаунты».\n2) Запусти «Парсинг» и укажи источники.\n3) Запусти «Инвайт» и укажи цель.\n4) В «Управление» можно остановить задачу и очистить список.\n5) В «Аналитика» видно результаты.\n\nНа любом шаге нажми «❌ Отмена» или «🎛 Меню».'
+			'🤝 Как пользоваться:\n1) Добавь .session аккаунты в разделе «Аккаунты».\n2) Запусти «Парсинг» и укажи источники.\n3) Запусти «Инвайт» и укажи цель.\n4) В «Управление» можно остановить задачу и очистить список.\n5) В «Аналитика» видно результаты.\n\nВо время выполнения бот отправляет живые апдейты прогресса.\nНа любом шаге нажми «❌ Отмена» или «🎛 Меню».'
 		)
 		return
 #	if call.data == 'Multi':
