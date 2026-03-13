@@ -40,18 +40,18 @@ TASK_LOCK = threading.Lock()
 def build_new_menu():
 	keyboard = types.InlineKeyboardMarkup()
 	keyboard.add(
-		types.InlineKeyboardButton(text='📂 Аккаунты (.session)', callback_data='accounts_menu'),
-		types.InlineKeyboardButton(text='🔎 Парсинг', callback_data='parser_start'),
+		types.InlineKeyboardButton(text='🧩 Аккаунты • Session', callback_data='accounts_menu'),
+		types.InlineKeyboardButton(text='🔎 Парсинг • Аудитория', callback_data='parser_start'),
 	)
 	keyboard.add(
-		types.InlineKeyboardButton(text='📨 Инвайт', callback_data='inviter_start'),
-		types.InlineKeyboardButton(text='📊 Статус задач', callback_data='task_status'),
+		types.InlineKeyboardButton(text='📨 Инвайт • Добавление', callback_data='inviter_start'),
+		types.InlineKeyboardButton(text='📊 Статус • Live', callback_data='task_status'),
 	)
 	keyboard.add(
-		types.InlineKeyboardButton(text='⚙️ Управление', callback_data='manage_menu'),
-		types.InlineKeyboardButton(text='📈 Аналитика', callback_data='stats_overview'),
+		types.InlineKeyboardButton(text='⚙️ Управление • Процессы', callback_data='manage_menu'),
+		types.InlineKeyboardButton(text='📈 Аналитика • Отчёты', callback_data='stats_overview'),
 	)
-	keyboard.add(types.InlineKeyboardButton(text='ℹ️ Помощь', callback_data='help_new'))
+	keyboard.add(types.InlineKeyboardButton(text='ℹ️ Помощь • Гайд', callback_data='help_new'))
 	return keyboard
 
 
@@ -183,10 +183,21 @@ def _is_cancel(text):
 def _step_keyboard():
 	keyboard = types.InlineKeyboardMarkup()
 	keyboard.add(
-		types.InlineKeyboardButton(text='❌ Отмена', callback_data='cancel_flow'),
-		types.InlineKeyboardButton(text='⬅️ В меню', callback_data='main_menu'),
+		types.InlineKeyboardButton(text='❌ Отменить сценарий', callback_data='cancel_flow'),
+		types.InlineKeyboardButton(text='⬅️ Назад в меню', callback_data='main_menu'),
 	)
 	return keyboard
+
+
+def _is_admin(user_id):
+	try:
+		return int(user_id) == int(admin)
+	except Exception:
+		return False
+
+
+def _deny_access(chat_id):
+	bot.send_message(chat_id, '⛔ Доступ закрыт. Этим ботом может пользоваться только администратор.')
 
 
 def _build_manage_menu():
@@ -236,6 +247,9 @@ def _stats_text():
 @bot.message_handler(commands=['start'])
 def start_message(message):
 	if message.chat.type == 'private':
+		if not _is_admin(message.chat.id):
+			_deny_access(message.chat.id)
+			return
 		userid = str(message.chat.id)
 		username = str(message.from_user.username)
 		connection = get_main_connection()
@@ -262,12 +276,16 @@ def start_message(message):
 			keyboard.add(types.InlineKeyboardButton(text=f'''💢 Как работает сервис ?!''',url=f'https://telegra.ph/Informaciya-po-proektu-10-29'))
 			bot.send_message(message.chat.id,f'💡 Перед началом использования сервиса, пожалуйста, ознакомьтесь со статьей: https://telegra.ph/Informaciya-po-proektu-10-29',parse_mode='HTML',reply_markup=keyboard, disable_web_page_preview=True)
 
-		bot.send_message(message.chat.id, '👑 Добро пожаловать! Управление через кнопки ниже.', parse_mode='HTML', reply_markup=keyboards.main)
-		bot.send_message(message.chat.id, '✨ Главное меню управления:', parse_mode='HTML', reply_markup=build_new_menu())
+		bot.send_message(message.chat.id, '👑 Добро пожаловать в <b>Teddy Invite Pro</b>.', parse_mode='HTML', reply_markup=keyboards.main)
+		bot.send_message(message.chat.id, '✨ Панель управления готова. Выберите действие ниже:', parse_mode='HTML', reply_markup=build_new_menu())
 
 @bot.message_handler(content_types=['text'])
 def send_text(message):
 	if message.chat.type == 'private':
+		if not _is_admin(message.chat.id):
+			if message.text.lower() in ['/start', '🎛 меню', 'меню', 'menu']:
+				_deny_access(message.chat.id)
+			return
 		if message.text.lower() == '/admin':
 			if message.chat.id == admin:
 				connection = get_main_connection()
@@ -316,6 +334,9 @@ def send_text(message):
 def receive_session_file(message):
 	if message.chat.type != 'private':
 		return
+	if not _is_admin(message.chat.id):
+		_deny_access(message.chat.id)
+		return
 	doc = message.document
 	if not doc or not str(doc.file_name).lower().endswith('.session'):
 		bot.send_message(message.chat.id, 'Нужен файл формата .session (как документ).')
@@ -329,16 +350,26 @@ def receive_session_file(message):
 
 
 def parser_step_sources(message):
+	if not _is_admin(message.chat.id):
+		_deny_access(message.chat.id)
+		return
 	if _is_cancel(message.text):
 		USER_STATE.pop(message.chat.id, None)
 		bot.send_message(message.chat.id, '❌ Действие отменено.', reply_markup=build_new_menu())
 		return
 	USER_STATE[message.chat.id] = {'flow': 'parser', 'sources': message.text}
-	msg = bot.send_message(message.chat.id, 'Шаг 2/3: укажи количество постов для анализа (например: 100).', reply_markup=keyboards.otmena)
+	msg = bot.send_message(
+		message.chat.id,
+		'🔎 Парсинг • Шаг 2/3\nУкажи количество постов для анализа (например: 100).',
+		reply_markup=_step_keyboard()
+	)
 	bot.register_next_step_handler(msg, parser_step_posts)
 
 
 def parser_step_posts(message):
+	if not _is_admin(message.chat.id):
+		_deny_access(message.chat.id)
+		return
 	if _is_cancel(message.text):
 		USER_STATE.pop(message.chat.id, None)
 		bot.send_message(message.chat.id, '❌ Действие отменено.', reply_markup=build_new_menu())
@@ -349,11 +380,18 @@ def parser_step_posts(message):
 	except (TypeError, ValueError):
 		state['posts_limit'] = 100
 	USER_STATE[message.chat.id] = state
-	msg = bot.send_message(message.chat.id, 'Шаг 3/3: укажи лимит комментариев (например: 200).', reply_markup=keyboards.otmena)
+	msg = bot.send_message(
+		message.chat.id,
+		'🔎 Парсинг • Шаг 3/3\nУкажи лимит комментариев (например: 200).',
+		reply_markup=_step_keyboard()
+	)
 	bot.register_next_step_handler(msg, parser_step_comments)
 
 
 def parser_step_comments(message):
+	if not _is_admin(message.chat.id):
+		_deny_access(message.chat.id)
+		return
 	if _is_cancel(message.text):
 		USER_STATE.pop(message.chat.id, None)
 		bot.send_message(message.chat.id, '❌ Действие отменено.', reply_markup=build_new_menu())
@@ -382,16 +420,26 @@ def parser_step_comments(message):
 
 
 def inviter_step_sources(message):
+	if not _is_admin(message.chat.id):
+		_deny_access(message.chat.id)
+		return
 	if _is_cancel(message.text):
 		USER_STATE.pop(message.chat.id, None)
 		bot.send_message(message.chat.id, '❌ Действие отменено.', reply_markup=build_new_menu())
 		return
 	USER_STATE[message.chat.id] = {'flow': 'inviter', 'sources': message.text}
-	msg = bot.send_message(message.chat.id, 'Шаг 2/4: укажи цель инвайта (@chat или @channel).', reply_markup=keyboards.otmena)
+	msg = bot.send_message(
+		message.chat.id,
+		'📨 Инвайт • Шаг 2/4\nУкажи цель инвайта (@chat или @channel).',
+		reply_markup=_step_keyboard()
+	)
 	bot.register_next_step_handler(msg, inviter_step_target)
 
 
 def inviter_step_target(message):
+	if not _is_admin(message.chat.id):
+		_deny_access(message.chat.id)
+		return
 	if _is_cancel(message.text):
 		USER_STATE.pop(message.chat.id, None)
 		bot.send_message(message.chat.id, '❌ Действие отменено.', reply_markup=build_new_menu())
@@ -399,15 +447,22 @@ def inviter_step_target(message):
 	state = USER_STATE.get(message.chat.id, {})
 	target = message.text.strip()
 	if target == '':
-		bot.send_message(message.chat.id, '⚠️ Цель пустая. Введи @chat или @channel.', reply_markup=keyboards.otmena)
+		bot.send_message(message.chat.id, '⚠️ Цель пустая. Введи @chat или @channel.', reply_markup=_step_keyboard())
 		return
 	state['invite_target'] = target
 	USER_STATE[message.chat.id] = state
-	msg = bot.send_message(message.chat.id, 'Шаг 3/4: лимит пользователей за запуск (например: 100).', reply_markup=keyboards.otmena)
+	msg = bot.send_message(
+		message.chat.id,
+		'📨 Инвайт • Шаг 3/4\nЛимит пользователей за запуск (например: 100).',
+		reply_markup=_step_keyboard()
+	)
 	bot.register_next_step_handler(msg, inviter_step_limit)
 
 
 def inviter_step_limit(message):
+	if not _is_admin(message.chat.id):
+		_deny_access(message.chat.id)
+		return
 	if _is_cancel(message.text):
 		USER_STATE.pop(message.chat.id, None)
 		bot.send_message(message.chat.id, '❌ Действие отменено.', reply_markup=build_new_menu())
@@ -418,11 +473,18 @@ def inviter_step_limit(message):
 	except (TypeError, ValueError):
 		state['limit'] = 100
 	USER_STATE[message.chat.id] = state
-	msg = bot.send_message(message.chat.id, 'Шаг 4/4: пауза между инвайтами в секундах (например: 15).', reply_markup=keyboards.otmena)
+	msg = bot.send_message(
+		message.chat.id,
+		'📨 Инвайт • Шаг 4/4\nПауза между инвайтами в секундах (например: 15).',
+		reply_markup=_step_keyboard()
+	)
 	bot.register_next_step_handler(msg, inviter_step_sleep)
 
 
 def inviter_step_sleep(message):
+	if not _is_admin(message.chat.id):
+		_deny_access(message.chat.id)
+		return
 	if _is_cancel(message.text):
 		USER_STATE.pop(message.chat.id, None)
 		bot.send_message(message.chat.id, '❌ Действие отменено.', reply_markup=build_new_menu())
@@ -454,6 +516,14 @@ def inviter_step_sleep(message):
 
 @bot.callback_query_handler(func=lambda call:True)
 def podcategors(call):
+	if not _is_admin(call.from_user.id):
+		try:
+			bot.answer_callback_query(call.id, 'Нет доступа')
+		except Exception:
+			pass
+		_deny_access(call.message.chat.id)
+		return
+
 	if call.data == 'cancel_flow':
 		USER_STATE.pop(call.message.chat.id, None)
 		bot.send_message(call.message.chat.id, '❌ Текущий сценарий отменен.', reply_markup=build_new_menu())
@@ -509,7 +579,7 @@ def podcategors(call):
 		msg = bot.send_message(
 			call.message.chat.id,
 			'🔎 Парсинг\nШаг 1/3: отправь источники (через запятую или с новой строки).\nПример:\n@chat1\n@chat2',
-			reply_markup=keyboards.otmena
+			reply_markup=_step_keyboard()
 		)
 		bot.register_next_step_handler(msg, parser_step_sources)
 		return
@@ -518,7 +588,7 @@ def podcategors(call):
 		msg = bot.send_message(
 			call.message.chat.id,
 			'📨 Инвайт\nШаг 1/4: отправь источники, из которых брать пользователей.',
-			reply_markup=keyboards.otmena
+			reply_markup=_step_keyboard()
 		)
 		bot.register_next_step_handler(msg, inviter_step_sources)
 		return
