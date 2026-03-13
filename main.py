@@ -250,8 +250,8 @@ def _check_account_health(session, deep_check=False):
 			if not await client.is_user_authorized():
 				return 'dead', 'Сессия не авторизована'
 			me = await client.get_me()
-			await _join_test_chat_if_needed(client)
 			if deep_check:
+				await _join_test_chat_if_needed(client)
 				probe_status, probe_reason = await _probe_spam_block(client)
 				if probe_status == 'limited':
 					return 'limited', probe_reason
