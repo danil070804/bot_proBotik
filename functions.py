@@ -1,7 +1,10 @@
 from glob import glob
 from config import *
 import os
+import json
 import python_socks
+from telethon import TelegramClient
+from telethon.sessions import StringSession
 
 
 def get_chats():
@@ -61,7 +64,32 @@ def link_convert(chat):
 
 
 def get_sessions():
-    return glob('*.session')
+    sessions = []
+    sessions.extend(glob('*.session'))
+    sessions.extend(glob('*.json'))
+    return sessions
+
+
+def build_telegram_client(session_ref, api_id, api_hash, proxy=None):
+    ref = str(session_ref or '').strip()
+    if ref.lower().endswith('.json'):
+        with open(ref, 'r', encoding='utf-8') as f:
+            raw = f.read().strip()
+        data = None
+        try:
+            data = json.loads(raw)
+        except Exception:
+            data = None
+        if isinstance(data, dict):
+            value = str(data.get('session') or data.get('string_session') or data.get('string') or '').strip()
+        elif isinstance(data, str):
+            value = data.strip()
+        else:
+            value = raw
+        if not value:
+            raise RuntimeError(f'Пустой StringSession в файле {ref}')
+        return TelegramClient(StringSession(value), api_id, api_hash, proxy=proxy)
+    return TelegramClient(ref, api_id, api_hash, proxy=proxy)
 
 
 def chats_for_acc(lst, n):

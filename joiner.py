@@ -1,4 +1,3 @@
-from telethon import TelegramClient
 from telethon.errors import InviteHashExpiredError, UserAlreadyParticipantError, ChannelsTooMuchError, FloodWaitError, UserBannedInChannelError
 from telethon.tl.functions.channels import JoinChannelRequest
 from telethon.tl.functions.messages import ImportChatInviteRequest
@@ -8,7 +7,7 @@ from time import sleep
 import asyncio
 
 from config import API_ID, API_HASH, slp, join_sleep, from_join_sleep, to_join_sleep
-from functions import get_sessions, get_proxy, generate_chats_list, link_convert
+from functions import get_sessions, get_proxy, generate_chats_list, link_convert, build_telegram_client
 from db import insert_chat_db, get_all_chats, is_full
 
 
@@ -47,7 +46,7 @@ async def join_to_chat(chat, client, session):
 
 
 async def add_acc(session, chats, proxy):
-    client = TelegramClient(session, API_ID, API_HASH, proxy=proxy)
+    client = build_telegram_client(session, API_ID, API_HASH, proxy=proxy)
     await client.start()
     logger.info(f'Joiner started ({session})')
     for chat in chats:
@@ -68,7 +67,7 @@ async def main():
     logger.info('Script started')
 
     for sess in sessions:
-        client = TelegramClient(sess, API_ID, API_HASH, proxy=proxy)
+        client = build_telegram_client(sess, API_ID, API_HASH, proxy=proxy)
         await client.start()
         await client.disconnect()
         logger.info(f'Проверка аккаунта {sess}, сон {slp} сек')

@@ -3,13 +3,12 @@ import asyncio
 import json
 
 from loguru import logger
-from telethon import TelegramClient
 from telethon.errors import FloodWaitError, UserAlreadyParticipantError
 from telethon.tl.functions.channels import JoinChannelRequest
 
 from config import API_ID, API_HASH
 from db import save_parsed_user, save_parsed_comment, is_source_allowed
-from functions import get_sessions, get_proxy
+from functions import get_sessions, get_proxy, build_telegram_client
 
 
 logger.add('logging.log', rotation='1 MB', encoding='utf-8')
@@ -118,7 +117,7 @@ async def run_parser(target, targets_file, posts_limit, comments_limit, session_
         raise RuntimeError('Set --target or --targets-file with source chats/channels')
     sessions = get_sessions()
     if not sessions:
-        raise RuntimeError('No .session files found')
+        raise RuntimeError('No session files found')
     if not use_all_sessions and (session_index < 0 or session_index >= len(sessions)):
         raise RuntimeError(f'session-index out of range: 0..{len(sessions) - 1}')
     proxy = get_proxy()
@@ -143,7 +142,7 @@ async def run_parser(target, targets_file, posts_limit, comments_limit, session_
         progress['message'] = f'Parsing {src}'
         _write_progress(progress_file, progress)
         sess = selected_sessions[idx % len(selected_sessions)]
-        client = TelegramClient(sess, API_ID, API_HASH, proxy=proxy)
+        client = build_telegram_client(sess, API_ID, API_HASH, proxy=proxy)
         await client.start()
         users, comments = await parse_target_with_client(client, src, posts_limit, comments_limit)
         await client.disconnect()

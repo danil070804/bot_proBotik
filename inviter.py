@@ -3,7 +3,6 @@ import asyncio
 import json
 
 from loguru import logger
-from telethon import TelegramClient
 from telethon.errors import (
     FloodWaitError,
     PeerFloodError,
@@ -26,7 +25,7 @@ from db import (
     get_account_cooldown_remaining,
     set_account_health,
 )
-from functions import get_proxy, get_sessions
+from functions import get_proxy, get_sessions, build_telegram_client
 
 
 logger.add('logging.log', rotation='1 MB', encoding='utf-8')
@@ -105,7 +104,7 @@ def _pick_next_session(sessions, start_idx):
 async def _get_or_create_client(session, clients, proxy, invite_target):
     if session in clients:
         return clients[session]
-    client = TelegramClient(session, API_ID, API_HASH, proxy=proxy)
+    client = build_telegram_client(session, API_ID, API_HASH, proxy=proxy)
     await client.start()
     set_account_health(session, 'active', 'Авторизация успешна')
     await ensure_join_target(client, invite_target)
@@ -127,7 +126,7 @@ async def run_inviter(
 
     sessions = get_sessions()
     if not sessions:
-        raise RuntimeError('No .session files found')
+        raise RuntimeError('No session files found')
     if not use_all_sessions and (session_index < 0 or session_index >= len(sessions)):
         raise RuntimeError(f'session-index out of range: 0..{len(sessions) - 1}')
 

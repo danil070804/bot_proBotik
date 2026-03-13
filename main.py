@@ -29,11 +29,10 @@ from db import (
 	add_user_filter, remove_user_filter, get_user_filters,
 	get_account_health, set_account_health
 )
-from telethon import TelegramClient
 from telethon.errors import UserAlreadyParticipantError
 from telethon.tl.functions.channels import JoinChannelRequest
 from telethon.tl.functions.messages import ImportChatInviteRequest
-from functions import get_proxy
+from functions import get_proxy, get_sessions, build_telegram_client
 
 from pyqiwip2p import QiwiP2P
 from pyqiwip2p.p2p_types import QiwiCustomer, QiwiDatetime
@@ -127,7 +126,7 @@ def build_new_menu():
 
 
 def list_sessions():
-	return glob.glob('*.session')
+	return get_sessions()
 
 
 def _account_status_emoji(status):
@@ -256,7 +255,7 @@ def _check_account_health(session, deep_check=False):
 	async def _run():
 		client = None
 		try:
-			client = TelegramClient(session, config.API_ID, config.API_HASH, proxy=get_proxy())
+			client = build_telegram_client(session, config.API_ID, config.API_HASH, proxy=get_proxy())
 			await client.connect()
 			if not await client.is_user_authorized():
 				return 'dead', 'Сессия не авторизована'
@@ -526,7 +525,7 @@ def _guide_text():
 	return (
 		'📘 <b>Гайд по функциям Teddy Invite Pro</b>\n\n'
 		'🧩 <b>Аккаунты • Session</b>\n'
-		'• Загружай <code>.session</code> как документ.\n'
+		'• Загружай <code>.session</code> или <code>.json</code> как документ.\n'
 		'• Сразу после загрузки бот делает health-check через Telethon:\n'
 		'  1) подключение к сессии,\n'
 		'  2) проверка авторизации (<code>is_user_authorized()</code>),\n'
@@ -856,8 +855,8 @@ def receive_session_file(message):
 		_deny_access(message.chat.id)
 		return
 	doc = message.document
-	if not doc or not str(doc.file_name).lower().endswith('.session'):
-		bot.send_message(message.chat.id, 'Нужен файл формата .session (как документ).')
+	if not doc or not str(doc.file_name).lower().endswith(('.session', '.json')):
+		bot.send_message(message.chat.id, 'Нужен файл формата .session или .json (как документ).')
 		return
 	file_info = bot.get_file(doc.file_id)
 	data = bot.download_file(file_info.file_path)
@@ -1224,7 +1223,7 @@ def podcategors(call):
 			f'📂 <b>Управление аккаунтами</b>\n'
 			f'Загружено: <b>{len(sessions)}</b>\n'
 			f'🟢 active: <b>{active}</b> | 🟠 limited: <b>{limited}</b> | 🔴 dead: <b>{dead}</b>\n\n'
-			'Отправь <code>.session</code> файлом — проверка выполнится автоматически.',
+			'Отправь <code>.session</code> или <code>.json</code> файлом — проверка выполнится автоматически.',
 			reply_markup=_build_accounts_menu(),
 			parse_mode='HTML'
 		)
