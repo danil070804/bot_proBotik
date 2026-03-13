@@ -230,33 +230,47 @@ def _setting_bool(key):
 	return str(_get_setting(key)).strip() in ['1', 'true', 'True', 'yes']
 
 
+def _setting_title(key):
+	titles = {
+		'parser_posts_limit': 'Лимит постов для парсинга',
+		'parser_comments_limit': 'Лимит комментариев для парсинга',
+		'parser_use_all_sessions': 'Использовать все аккаунты в парсинге',
+		'inviter_limit': 'Лимит пользователей за запуск инвайта',
+		'inviter_sleep': 'Пауза между инвайтами (сек)',
+		'inviter_per_account_limit': 'Лимит добавлений на 1 аккаунт',
+		'inviter_max_flood_wait': 'Максимальный FloodWait (сек)',
+		'inviter_use_all_sessions': 'Использовать все аккаунты в инвайте',
+	}
+	return titles.get(key, key)
+
+
 def _settings_text():
 	return (
 		'⚙️ Настройки парсинга и инвайта\n'
-		f'• Парсинг: posts={_setting_int("parser_posts_limit")}, comments={_setting_int("parser_comments_limit")}, '
-		f'все аккаунты={"ON" if _setting_bool("parser_use_all_sessions") else "OFF"}\n'
-		f'• Инвайт: limit={_setting_int("inviter_limit")}, sleep={_setting_int("inviter_sleep")}s, '
-		f'per_acc={_setting_int("inviter_per_account_limit")}, max_flood={_setting_int("inviter_max_flood_wait")}s, '
-		f'все аккаунты={"ON" if _setting_bool("inviter_use_all_sessions") else "OFF"}'
+		f'• Парсинг: постов={_setting_int("parser_posts_limit")}, комментариев={_setting_int("parser_comments_limit")}, '
+		f'все аккаунты={"ВКЛ" if _setting_bool("parser_use_all_sessions") else "ВЫКЛ"}\n'
+		f'• Инвайт: лимит={_setting_int("inviter_limit")}, пауза={_setting_int("inviter_sleep")}с, '
+		f'на аккаунт={_setting_int("inviter_per_account_limit")}, flood={_setting_int("inviter_max_flood_wait")}с, '
+		f'все аккаунты={"ВКЛ" if _setting_bool("inviter_use_all_sessions") else "ВЫКЛ"}'
 	)
 
 
 def _build_settings_menu():
 	keyboard = types.InlineKeyboardMarkup()
 	keyboard.add(
-		types.InlineKeyboardButton(text='✏️ Parser posts', callback_data='settings_edit|parser_posts_limit'),
-		types.InlineKeyboardButton(text='✏️ Parser comments', callback_data='settings_edit|parser_comments_limit'),
+		types.InlineKeyboardButton(text='✏️ Посты (парсинг)', callback_data='settings_edit|parser_posts_limit'),
+		types.InlineKeyboardButton(text='✏️ Комментарии (парсинг)', callback_data='settings_edit|parser_comments_limit'),
 	)
-	keyboard.add(types.InlineKeyboardButton(text='🔁 Parser all sessions', callback_data='settings_toggle|parser_use_all_sessions'))
+	keyboard.add(types.InlineKeyboardButton(text='🔁 Все аккаунты (парсинг)', callback_data='settings_toggle|parser_use_all_sessions'))
 	keyboard.add(
-		types.InlineKeyboardButton(text='✏️ Invite limit', callback_data='settings_edit|inviter_limit'),
-		types.InlineKeyboardButton(text='✏️ Invite sleep', callback_data='settings_edit|inviter_sleep'),
+		types.InlineKeyboardButton(text='✏️ Лимит (инвайт)', callback_data='settings_edit|inviter_limit'),
+		types.InlineKeyboardButton(text='✏️ Пауза (инвайт)', callback_data='settings_edit|inviter_sleep'),
 	)
 	keyboard.add(
-		types.InlineKeyboardButton(text='✏️ Per-account limit', callback_data='settings_edit|inviter_per_account_limit'),
-		types.InlineKeyboardButton(text='✏️ Max flood wait', callback_data='settings_edit|inviter_max_flood_wait'),
+		types.InlineKeyboardButton(text='✏️ Лимит на аккаунт', callback_data='settings_edit|inviter_per_account_limit'),
+		types.InlineKeyboardButton(text='✏️ Макс. FloodWait', callback_data='settings_edit|inviter_max_flood_wait'),
 	)
-	keyboard.add(types.InlineKeyboardButton(text='🔁 Invite all sessions', callback_data='settings_toggle|inviter_use_all_sessions'))
+	keyboard.add(types.InlineKeyboardButton(text='🔁 Все аккаунты (инвайт)', callback_data='settings_toggle|inviter_use_all_sessions'))
 	keyboard.add(types.InlineKeyboardButton(text='♻️ Сброс по умолчанию', callback_data='settings_reset'))
 	keyboard.add(types.InlineKeyboardButton(text='⬅️ Назад', callback_data='main_menu'))
 	return keyboard
@@ -296,11 +310,11 @@ def _stats_text():
 			f'📈 Аналитика:\n'
 			f'Юзернеймов в базе: {parsed_users}\n'
 			f'Комментариев в базе: {parsed_comments}\n'
-			f'Invited: {status_map.get("invited", 0)}\n'
-			f'Already: {status_map.get("already", 0)}\n'
-			f'Privacy: {status_map.get("privacy", 0)}\n'
+			f'Успешно добавлено: {status_map.get("invited", 0)}\n'
+			f'Уже в чате/канале: {status_map.get("already", 0)}\n'
+			f'Приватность (запрет): {status_map.get("privacy", 0)}\n'
 			f'Flood/PeerFlood: {status_map.get("flood_wait", 0) + status_map.get("peer_flood", 0)}\n'
-			f'Errors: {status_map.get("error", 0)}'
+			f'Ошибки: {status_map.get("error", 0)}'
 		)
 	except Exception as e:
 		return f'Не удалось собрать аналитику: {e}'
@@ -603,7 +617,12 @@ def settings_value_step(message):
 		return
 	_set_setting(key, val)
 	USER_STATE.pop(message.chat.id, None)
-	bot.send_message(message.chat.id, f'✅ Настройка <code>{key}</code> обновлена: <b>{val}</b>', parse_mode='HTML', reply_markup=_build_settings_menu())
+	bot.send_message(
+		message.chat.id,
+		f'✅ Настройка обновлена\n<b>{_setting_title(key)}</b>: <b>{val}</b>',
+		parse_mode='HTML',
+		reply_markup=_build_settings_menu()
+	)
 
 @bot.callback_query_handler(func=lambda call:True)
 def podcategors(call):
@@ -638,7 +657,7 @@ def podcategors(call):
 		key = call.data.split('|', 1)[1]
 		cur = _setting_bool(key)
 		_set_setting(key, '0' if cur else '1')
-		bot.send_message(call.message.chat.id, f'✅ {key}: {"OFF" if cur else "ON"}', reply_markup=_build_settings_menu())
+		bot.send_message(call.message.chat.id, f'✅ {_setting_title(key)}: {"ВЫКЛ" if cur else "ВКЛ"}', reply_markup=_build_settings_menu())
 		return
 
 	if call.data.startswith('settings_edit|'):
@@ -646,7 +665,7 @@ def podcategors(call):
 		USER_STATE[call.message.chat.id] = {'flow': 'settings', 'settings_key': key}
 		msg = bot.send_message(
 			call.message.chat.id,
-			f'🛠 Введите новое числовое значение для <code>{key}</code>.\nТекущее: <b>{_get_setting(key)}</b>',
+			f'🛠 Введите новое числовое значение для:\n<b>{_setting_title(key)}</b>\n\nТекущее значение: <b>{_get_setting(key)}</b>',
 			parse_mode='HTML',
 			reply_markup=_step_keyboard()
 		)
@@ -699,8 +718,8 @@ def podcategors(call):
 		msg = bot.send_message(
 			call.message.chat.id,
 			'🔎 Парсинг\nШаг 1/3: отправь источники (через запятую или с новой строки).\n'
-			f'Текущие настройки: posts={_setting_int("parser_posts_limit")}, comments={_setting_int("parser_comments_limit")}, '
-			f'all_sessions={"ON" if _setting_bool("parser_use_all_sessions") else "OFF"}.\n'
+			f'Текущие настройки: постов={_setting_int("parser_posts_limit")}, комментариев={_setting_int("parser_comments_limit")}, '
+			f'все аккаунты={"ВКЛ" if _setting_bool("parser_use_all_sessions") else "ВЫКЛ"}.\n'
 			'Пример:\n@chat1\n@chat2',
 			reply_markup=_step_keyboard()
 		)
@@ -711,9 +730,9 @@ def podcategors(call):
 		msg = bot.send_message(
 			call.message.chat.id,
 			'📨 Инвайт\nШаг 1/4: отправь источники, из которых брать пользователей.\n'
-			f'Текущие настройки: limit={_setting_int("inviter_limit")}, sleep={_setting_int("inviter_sleep")}s, '
-			f'per_acc={_setting_int("inviter_per_account_limit")}, flood={_setting_int("inviter_max_flood_wait")}s, '
-			f'all_sessions={"ON" if _setting_bool("inviter_use_all_sessions") else "OFF"}.',
+			f'Текущие настройки: лимит={_setting_int("inviter_limit")}, пауза={_setting_int("inviter_sleep")}с, '
+			f'на аккаунт={_setting_int("inviter_per_account_limit")}, flood={_setting_int("inviter_max_flood_wait")}с, '
+			f'все аккаунты={"ВКЛ" if _setting_bool("inviter_use_all_sessions") else "ВЫКЛ"}.',
 			reply_markup=_step_keyboard()
 		)
 		bot.register_next_step_handler(msg, inviter_step_sources)
