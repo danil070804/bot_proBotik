@@ -27,7 +27,8 @@ from db import (
 	get_main_connection, init_db, get_app_setting, set_app_setting,
 	add_source_filter, remove_source_filter, get_source_filters,
 	add_user_filter, remove_user_filter, get_user_filters,
-	get_account_health, set_account_health, set_account_warmup, get_account_warmup_remaining
+	get_account_health, set_account_health, set_account_warmup, get_account_warmup_remaining,
+	save_session_file, delete_session_file, get_session_files
 )
 from telethon.errors import UserAlreadyParticipantError
 from telethon.tl.functions.channels import JoinChannelRequest
@@ -42,6 +43,20 @@ TOKEN = config.bot_invite_token
 bot = telebot.TeleBot(TOKEN)
 admin = config.admin
 init_db()
+
+
+def _restore_session_files():
+	try:
+		for name, content in get_session_files():
+			if not str(name).lower().endswith(('.session', '.json')):
+				continue
+			with open(name, 'wb') as f:
+				f.write(content)
+	except Exception:
+		pass
+
+
+_restore_session_files()
 USER_STATE = {}
 RUNNING_TASKS = {}
 TASK_QUEUE = Queue()
@@ -336,6 +351,7 @@ def _process_uploaded_session(chat_id, filename):
 				os.remove(filename)
 		except Exception:
 			pass
+		delete_session_file(filename)
 		bot.send_message(
 			chat_id,
 			f'🗑 <b>Аккаунт удалён автоматически</b>\n'
@@ -948,6 +964,7 @@ def receive_session_file(message):
 	file_info = bot.get_file(doc.file_id)
 	data = bot.download_file(file_info.file_path)
 	filename = os.path.basename(doc.file_name)
+	save_session_file(filename, data)
 	with open(filename, 'wb') as f:
 		f.write(data)
 	queue_pos = _enqueue_uploaded_session(message.chat.id, filename)
@@ -1352,8 +1369,10 @@ def podcategors(call):
 		try:
 			if os.path.exists(filename):
 				os.remove(filename)
+				delete_session_file(filename)
 				bot.send_message(call.message.chat.id, f'Удален аккаунт: {filename}')
 			else:
+				delete_session_file(filename)
 				bot.send_message(call.message.chat.id, 'Файл уже отсутствует.')
 		except Exception as e:
 			bot.send_message(call.message.chat.id, f'Ошибка удаления: {e}')

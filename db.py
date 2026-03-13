@@ -83,6 +83,10 @@ def init_db():
                 'session TEXT PRIMARY KEY, status TEXT NOT NULL, details TEXT, '
                 'last_check TIMESTAMP DEFAULT NOW(), updated_at TIMESTAMP DEFAULT NOW())'
             )
+            cursor.execute(
+                'CREATE TABLE IF NOT EXISTS session_files('
+                'name TEXT PRIMARY KEY, content BYTEA NOT NULL, created_at TIMESTAMP DEFAULT NOW())'
+            )
         else:
             cursor.execute('CREATE TABLE IF NOT EXISTS chats(acc TEXT, chat TEXT UNIQUE)')
             cursor.execute(
@@ -134,6 +138,10 @@ def init_db():
                 'CREATE TABLE IF NOT EXISTS account_health('
                 'session TEXT PRIMARY KEY, status TEXT NOT NULL, details TEXT, '
                 'last_check TEXT DEFAULT CURRENT_TIMESTAMP, updated_at TEXT DEFAULT CURRENT_TIMESTAMP)'
+            )
+            cursor.execute(
+                'CREATE TABLE IF NOT EXISTS session_files('
+                'name TEXT PRIMARY KEY, content BLOB NOT NULL, created_at TEXT DEFAULT CURRENT_TIMESTAMP)'
             )
         conn.commit()
         cursor.close()
@@ -557,6 +565,57 @@ def get_account_warmup_remaining(session):
     except Exception:
         until_ts = 0
     return max(0, until_ts - int(_time.time()))
+
+
+def save_session_file(name, content):
+    name = str(name or '').strip()
+    if not name:
+        return
+    if not isinstance(content, (bytes, bytearray)):
+        content = bytes(content or b'')
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        if IS_POSTGRES:
+            cursor.execute(
+                'INSERT INTO session_files(name, content) VALUES (%s, %s) '
+                'ON CONFLICT (name) DO UPDATE SET content = EXCLUDED.content',
+                (name, psycopg2.Binary(bytes(content))),
+            )
+        else:
+            cursor.execute(
+                'INSERT OR REPLACE INTO session_files(name, content) VALUES (?, ?)',
+                (name, bytes(content)),
+            )
+        conn.commit()
+        cursor.close()
+
+
+def delete_session_file(name):
+    name = str(name or '').strip()
+    if not name:
+        return
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        if IS_POSTGRES:
+            cursor.execute('DELETE FROM session_files WHERE name = %s', (name,))
+        else:
+            cursor.execute('DELETE FROM session_files WHERE name = ?', (name,))
+        conn.commit()
+        cursor.close()
+
+
+def get_session_files():
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('SELECT name, content FROM session_files')
+        rows = cursor.fetchall()
+        cursor.close()
+        result = []
+        for name, content in rows:
+            if content is None:
+                continue
+            result.append((str(name), bytes(content)))
+        return result
 
 
 def set_account_health(session, status, details=''):
