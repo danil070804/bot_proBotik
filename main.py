@@ -325,6 +325,40 @@ def _notify_health_change_if_needed(session, prev_status, new_status, details):
 		pass
 
 
+def _process_uploaded_session(chat_id, filename):
+	status, details = _check_account_health(filename, deep_check=False)
+	prev = set_account_health(filename, status, details)
+	_notify_health_change_if_needed(filename, prev, status, details)
+	if status == 'dead':
+		try:
+			if os.path.exists(filename):
+				os.remove(filename)
+		except Exception:
+			pass
+		bot.send_message(
+			chat_id,
+			f'🗑 <b>Аккаунт удалён автоматически</b>\n'
+			f'Файл: <code>{filename}</code>\n'
+			f'Причина: <code>{_health_details_ru(details)[:300]}</code>',
+			parse_mode='HTML'
+		)
+		return
+	if status == 'active':
+		warmup_days = max(0, _setting_int('account_warmup_days'))
+		set_account_warmup(filename, warmup_days * 86400)
+		warmup_text = f'\nПрогрев до инвайта: <b>{warmup_days} дн.</b>' if warmup_days > 0 else ''
+	else:
+		warmup_text = ''
+	bot.send_message(
+		chat_id,
+		f'✅ Аккаунт добавлен: <code>{filename}</code>\n'
+		f'Статус: {_account_status_emoji(status)} <b>{_account_status_title(status)}</b>\n'
+		f'Детали: <code>{_health_details_ru(details)[:300]}</code>\n'
+		f'Всего аккаунтов: <b>{len(list_sessions())}</b>{warmup_text}',
+		parse_mode='HTML'
+	)
+
+
 def _save_targets_file(user_id, text_value, prefix):
 	filename = f'{prefix}_{user_id}.txt'
 	rows = []
@@ -892,37 +926,12 @@ def receive_session_file(message):
 	filename = os.path.basename(doc.file_name)
 	with open(filename, 'wb') as f:
 		f.write(data)
-	status, details = _check_account_health(filename, deep_check=False)
-	prev = set_account_health(filename, status, details)
-	_notify_health_change_if_needed(filename, prev, status, details)
-	if status == 'dead':
-		try:
-			if os.path.exists(filename):
-				os.remove(filename)
-		except Exception:
-			pass
-		bot.send_message(
-			message.chat.id,
-			f'🗑 <b>Аккаунт удалён автоматически</b>\n'
-			f'Файл: <code>{filename}</code>\n'
-			f'Причина: <code>{_health_details_ru(details)[:300]}</code>',
-			parse_mode='HTML'
-		)
-		return
-	if status == 'active':
-		warmup_days = max(0, _setting_int('account_warmup_days'))
-		set_account_warmup(filename, warmup_days * 86400)
-		warmup_text = f'\nПрогрев до инвайта: <b>{warmup_days} дн.</b>' if warmup_days > 0 else ''
-	else:
-		warmup_text = ''
 	bot.send_message(
 		message.chat.id,
-		f'✅ Аккаунт добавлен: <code>{filename}</code>\n'
-		f'Статус: {_account_status_emoji(status)} <b>{_account_status_title(status)}</b>\n'
-		f'Детали: <code>{_health_details_ru(details)[:300]}</code>\n'
-		f'Всего аккаунтов: <b>{len(list_sessions())}</b>{warmup_text}',
+		f'⏳ Файл <code>{filename}</code> загружен.\nПроверяю аккаунт в фоне...',
 		parse_mode='HTML'
 	)
+	threading.Thread(target=_process_uploaded_session, args=(message.chat.id, filename), daemon=True).start()
 
 
 def parser_step_sources(message):
