@@ -5,4 +5,4 @@ main = telebot.types.ReplyKeyboardMarkup(True)
 main.row('🎛 Меню')
 
 otmena = telebot.types.ReplyKeyboardMarkup(True)
-otmena.row('Отмена')
+otmena.row('❌ Отмена', '🎛 Меню')

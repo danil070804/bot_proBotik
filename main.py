@@ -120,7 +120,16 @@ def _enqueue_process(user_id, title, command):
 
 
 def _is_cancel(text):
-	return str(text).strip().lower() in ['отмена', 'cancel', 'меню', 'menu']
+	return str(text).strip().lower() in ['отмена', '❌ отмена', 'cancel', 'меню', 'menu', 'назад', 'back']
+
+
+def _step_keyboard():
+	keyboard = types.InlineKeyboardMarkup()
+	keyboard.add(
+		types.InlineKeyboardButton(text='❌ Отмена', callback_data='cancel_flow'),
+		types.InlineKeyboardButton(text='⬅️ В меню', callback_data='main_menu'),
+	)
+	return keyboard
 
 
 def _build_manage_menu():
@@ -197,7 +206,7 @@ def start_message(message):
 			bot.send_message(message.chat.id,f'💡 Перед началом использования сервиса, пожалуйста, ознакомьтесь со статьей: https://telegra.ph/Informaciya-po-proektu-10-29',parse_mode='HTML',reply_markup=keyboard, disable_web_page_preview=True)
 
 		bot.send_message(message.chat.id, '👑 Добро пожаловать! Управление через кнопки ниже.', parse_mode='HTML', reply_markup=keyboards.main)
-		bot.send_message(message.chat.id, '◾️ Основное меню:', parse_mode='HTML', reply_markup=build_new_menu())
+		bot.send_message(message.chat.id, '✨ Главное меню управления:', parse_mode='HTML', reply_markup=build_new_menu())
 
 @bot.message_handler(content_types=['text'])
 def send_text(message):
@@ -242,7 +251,7 @@ def send_text(message):
 👣Очередь: {chat_no_send}''',parse_mode='HTML', reply_markup=keyboard)
 
 		elif message.text.lower() == '🎛 меню':
-			bot.send_message(message.chat.id, '◾️ Выберите нужный пункт меню:', parse_mode='HTML', reply_markup=build_new_menu())
+			bot.send_message(message.chat.id, '✨ Выберите действие:', parse_mode='HTML', reply_markup=build_new_menu())
 			return
 
 
@@ -252,28 +261,30 @@ def receive_session_file(message):
 		return
 	doc = message.document
 	if not doc or not str(doc.file_name).lower().endswith('.session'):
-		bot.send_message(message.chat.id, 'Пришлите файл формата .session')
+		bot.send_message(message.chat.id, 'Нужен файл формата .session (как документ).')
 		return
 	file_info = bot.get_file(doc.file_id)
 	data = bot.download_file(file_info.file_path)
 	filename = os.path.basename(doc.file_name)
 	with open(filename, 'wb') as f:
 		f.write(data)
-	bot.send_message(message.chat.id, f'Аккаунт добавлен: {filename}\nВсего аккаунтов: {len(list_sessions())}')
+	bot.send_message(message.chat.id, f'✅ Аккаунт добавлен: {filename}\nВсего аккаунтов: {len(list_sessions())}')
 
 
 def parser_step_sources(message):
 	if _is_cancel(message.text):
-		bot.send_message(message.chat.id, 'Отменено.', reply_markup=build_new_menu())
+		USER_STATE.pop(message.chat.id, None)
+		bot.send_message(message.chat.id, '❌ Действие отменено.', reply_markup=build_new_menu())
 		return
 	USER_STATE[message.chat.id] = {'flow': 'parser', 'sources': message.text}
-	msg = bot.send_message(message.chat.id, 'Введите posts-limit (пример: 100):')
+	msg = bot.send_message(message.chat.id, 'Шаг 2/3: укажи количество постов для анализа (например: 100).', reply_markup=keyboards.otmena)
 	bot.register_next_step_handler(msg, parser_step_posts)
 
 
 def parser_step_posts(message):
 	if _is_cancel(message.text):
-		bot.send_message(message.chat.id, 'Отменено.', reply_markup=build_new_menu())
+		USER_STATE.pop(message.chat.id, None)
+		bot.send_message(message.chat.id, '❌ Действие отменено.', reply_markup=build_new_menu())
 		return
 	state = USER_STATE.get(message.chat.id, {})
 	try:
@@ -281,13 +292,14 @@ def parser_step_posts(message):
 	except (TypeError, ValueError):
 		state['posts_limit'] = 100
 	USER_STATE[message.chat.id] = state
-	msg = bot.send_message(message.chat.id, 'Введите comments-limit (пример: 200):')
+	msg = bot.send_message(message.chat.id, 'Шаг 3/3: укажи лимит комментариев (например: 200).', reply_markup=keyboards.otmena)
 	bot.register_next_step_handler(msg, parser_step_comments)
 
 
 def parser_step_comments(message):
 	if _is_cancel(message.text):
-		bot.send_message(message.chat.id, 'Отменено.', reply_markup=build_new_menu())
+		USER_STATE.pop(message.chat.id, None)
+		bot.send_message(message.chat.id, '❌ Действие отменено.', reply_markup=build_new_menu())
 		return
 	state = USER_STATE.get(message.chat.id, {})
 	try:
@@ -296,7 +308,7 @@ def parser_step_comments(message):
 		comments_limit = 200
 	file_name, sources_count = _save_targets_file(message.chat.id, state.get('sources', ''), 'parser_sources')
 	if sources_count == 0:
-		bot.send_message(message.chat.id, 'Не найдено источников. Запустите заново.', reply_markup=build_new_menu())
+		bot.send_message(message.chat.id, '⚠️ Не нашёл источники. Запусти парсинг заново.', reply_markup=build_new_menu())
 		return
 	command = [
 		sys.executable, 'parser.py',
@@ -306,36 +318,40 @@ def parser_step_comments(message):
 		'--use-all-sessions'
 	]
 	queue_pos = _enqueue_process(message.chat.id, f'parser ({sources_count} sources)', command)
-	bot.send_message(message.chat.id, f'Парсинг добавлен в очередь. Источников: {sources_count}. Позиция в очереди: ~{queue_pos}')
+	USER_STATE.pop(message.chat.id, None)
+	bot.send_message(message.chat.id, f'✅ Парсинг добавлен в очередь.\nИсточников: {sources_count}\nПозиция: ~{queue_pos}', reply_markup=build_new_menu())
 
 
 def inviter_step_sources(message):
 	if _is_cancel(message.text):
-		bot.send_message(message.chat.id, 'Отменено.', reply_markup=build_new_menu())
+		USER_STATE.pop(message.chat.id, None)
+		bot.send_message(message.chat.id, '❌ Действие отменено.', reply_markup=build_new_menu())
 		return
 	USER_STATE[message.chat.id] = {'flow': 'inviter', 'sources': message.text}
-	msg = bot.send_message(message.chat.id, 'Введите @username целевого чата/канала для инвайта:')
+	msg = bot.send_message(message.chat.id, 'Шаг 2/4: укажи цель инвайта (@chat или @channel).', reply_markup=keyboards.otmena)
 	bot.register_next_step_handler(msg, inviter_step_target)
 
 
 def inviter_step_target(message):
 	if _is_cancel(message.text):
-		bot.send_message(message.chat.id, 'Отменено.', reply_markup=build_new_menu())
+		USER_STATE.pop(message.chat.id, None)
+		bot.send_message(message.chat.id, '❌ Действие отменено.', reply_markup=build_new_menu())
 		return
 	state = USER_STATE.get(message.chat.id, {})
 	target = message.text.strip()
 	if target == '':
-		bot.send_message(message.chat.id, 'Цель инвайта пустая, попробуйте снова.')
+		bot.send_message(message.chat.id, '⚠️ Цель пустая. Введи @chat или @channel.', reply_markup=keyboards.otmena)
 		return
 	state['invite_target'] = target
 	USER_STATE[message.chat.id] = state
-	msg = bot.send_message(message.chat.id, 'Введите лимит пользователей за запуск (пример: 100):')
+	msg = bot.send_message(message.chat.id, 'Шаг 3/4: лимит пользователей за запуск (например: 100).', reply_markup=keyboards.otmena)
 	bot.register_next_step_handler(msg, inviter_step_limit)
 
 
 def inviter_step_limit(message):
 	if _is_cancel(message.text):
-		bot.send_message(message.chat.id, 'Отменено.', reply_markup=build_new_menu())
+		USER_STATE.pop(message.chat.id, None)
+		bot.send_message(message.chat.id, '❌ Действие отменено.', reply_markup=build_new_menu())
 		return
 	state = USER_STATE.get(message.chat.id, {})
 	try:
@@ -343,13 +359,14 @@ def inviter_step_limit(message):
 	except (TypeError, ValueError):
 		state['limit'] = 100
 	USER_STATE[message.chat.id] = state
-	msg = bot.send_message(message.chat.id, 'Введите паузу между инвайтами в секундах (пример: 15):')
+	msg = bot.send_message(message.chat.id, 'Шаг 4/4: пауза между инвайтами в секундах (например: 15).', reply_markup=keyboards.otmena)
 	bot.register_next_step_handler(msg, inviter_step_sleep)
 
 
 def inviter_step_sleep(message):
 	if _is_cancel(message.text):
-		bot.send_message(message.chat.id, 'Отменено.', reply_markup=build_new_menu())
+		USER_STATE.pop(message.chat.id, None)
+		bot.send_message(message.chat.id, '❌ Действие отменено.', reply_markup=build_new_menu())
 		return
 	state = USER_STATE.get(message.chat.id, {})
 	try:
@@ -358,7 +375,7 @@ def inviter_step_sleep(message):
 		sleep_sec = 15
 	file_name, sources_count = _save_targets_file(message.chat.id, state.get('sources', ''), 'inviter_sources')
 	if sources_count == 0:
-		bot.send_message(message.chat.id, 'Не найдено источников. Запустите заново.', reply_markup=build_new_menu())
+		bot.send_message(message.chat.id, '⚠️ Не нашёл источники. Запусти инвайт заново.', reply_markup=build_new_menu())
 		return
 	command = [
 		sys.executable, 'inviter.py',
@@ -371,19 +388,25 @@ def inviter_step_sleep(message):
 		'--use-all-sessions'
 	]
 	queue_pos = _enqueue_process(message.chat.id, f'inviter ({sources_count} sources)', command)
-	bot.send_message(message.chat.id, f'Инвайт добавлен в очередь. Источников: {sources_count}. Позиция в очереди: ~{queue_pos}')
+	USER_STATE.pop(message.chat.id, None)
+	bot.send_message(message.chat.id, f'✅ Инвайт добавлен в очередь.\nИсточников: {sources_count}\nПозиция: ~{queue_pos}', reply_markup=build_new_menu())
 
 @bot.callback_query_handler(func=lambda call:True)
 def podcategors(call):
+	if call.data == 'cancel_flow':
+		USER_STATE.pop(call.message.chat.id, None)
+		bot.send_message(call.message.chat.id, '❌ Текущий сценарий отменен.', reply_markup=build_new_menu())
+		return
+
 	if call.data == 'main_menu':
-		bot.send_message(call.message.chat.id, '◾️ Основное меню:', reply_markup=build_new_menu())
+		bot.send_message(call.message.chat.id, '✨ Главное меню:', reply_markup=build_new_menu())
 		return
 
 	if call.data == 'accounts_menu':
 		sessions = list_sessions()
 		bot.send_message(
 			call.message.chat.id,
-			f'Аккаунтов загружено: {len(sessions)}\nПришлите .session файлы сюда документом.',
+			f'📂 Управление аккаунтами\nЗагружено аккаунтов: {len(sessions)}\n\nОтправь .session файл документом, чтобы добавить аккаунт.',
 			reply_markup=_build_accounts_menu()
 		)
 		return
@@ -424,7 +447,8 @@ def podcategors(call):
 	if call.data == 'parser_start':
 		msg = bot.send_message(
 			call.message.chat.id,
-			'Отправьте источники для парса (через запятую или с новой строки).\nПример:\n@chat1\n@chat2'
+			'🔎 Парсинг\nШаг 1/3: отправь источники (через запятую или с новой строки).\nПример:\n@chat1\n@chat2',
+			reply_markup=keyboards.otmena
 		)
 		bot.register_next_step_handler(msg, parser_step_sources)
 		return
@@ -432,7 +456,8 @@ def podcategors(call):
 	if call.data == 'inviter_start':
 		msg = bot.send_message(
 			call.message.chat.id,
-			'Отправьте источники, из которых брать пользователей для инвайта (через запятую или с новой строки).'
+			'📨 Инвайт\nШаг 1/4: отправь источники, из которых брать пользователей.',
+			reply_markup=keyboards.otmena
 		)
 		bot.register_next_step_handler(msg, inviter_step_sources)
 		return
@@ -440,7 +465,7 @@ def podcategors(call):
 	if call.data == 'task_status':
 		items = RUNNING_TASKS.get(call.message.chat.id, [])
 		if len(items) == 0:
-			bot.send_message(call.message.chat.id, 'Активных задач нет.')
+			bot.send_message(call.message.chat.id, 'Сейчас активных задач нет ✅')
 			return
 		lines = []
 		for idx, item in enumerate(items, start=1):
@@ -449,7 +474,7 @@ def podcategors(call):
 			pid_text = f'PID {pid}' if pid else 'PID -'
 			lines.append(f'{idx}. {item["title"]} - {status} - {pid_text}')
 		lines.append(f'Очередь (глобально): {TASK_QUEUE.qsize()}')
-		bot.send_message(call.message.chat.id, '\n'.join(lines))
+		bot.send_message(call.message.chat.id, '📊 Статус задач:\n' + '\n'.join(lines))
 		return
 
 	if call.data == 'manage_menu':
@@ -510,7 +535,7 @@ def podcategors(call):
 	if call.data == 'help_new':
 		bot.send_message(
 			call.message.chat.id,
-			'Как пользоваться:\n1) Загрузите .session аккаунты.\n2) "Парсинг" — источники + лимиты.\n3) "Инвайт" — источники + цель.\n4) "Управление" — стоп/очистка задач.\n5) "Аналитика" — результаты.\nНа шаге ввода можно написать: Отмена.'
+			'🤝 Как пользоваться:\n1) Добавь .session аккаунты в разделе «Аккаунты».\n2) Запусти «Парсинг» и укажи источники.\n3) Запусти «Инвайт» и укажи цель.\n4) В «Управление» можно остановить задачу и очистить список.\n5) В «Аналитика» видно результаты.\n\nНа любом шаге нажми «❌ Отмена» или «🎛 Меню».'
 		)
 		return
 #	if call.data == 'Multi':
