@@ -867,6 +867,20 @@ def receive_session_file(message):
 	status, details = _check_account_health(filename, deep_check=True)
 	prev = set_account_health(filename, status, details)
 	_notify_health_change_if_needed(filename, prev, status, details)
+	if status == 'dead':
+		try:
+			if os.path.exists(filename):
+				os.remove(filename)
+		except Exception:
+			pass
+		bot.send_message(
+			message.chat.id,
+			f'🗑 <b>Аккаунт удалён автоматически</b>\n'
+			f'Файл: <code>{filename}</code>\n'
+			f'Причина: <code>{_health_details_ru(details)[:300]}</code>',
+			parse_mode='HTML'
+		)
+		return
 	bot.send_message(
 		message.chat.id,
 		f'✅ Аккаунт добавлен: <code>{filename}</code>\n'
