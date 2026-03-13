@@ -42,6 +42,7 @@ from pyqiwip2p.p2p_types import QiwiCustomer, QiwiDatetime
 TOKEN = config.bot_invite_token
 bot = telebot.TeleBot(TOKEN)
 admin = config.admin
+ADMINS = set(getattr(config, 'admins', [admin]))
 init_db()
 
 
@@ -327,7 +328,7 @@ def _notify_health_change_if_needed(session, prev_status, new_status, details):
 		return
 	if new_status not in ('dead', 'limited', 'active'):
 		return
-	if not _is_admin(admin):
+	if len(ADMINS) == 0:
 		return
 	text = (
 		f'🔔 <b>Статус аккаунта изменился</b>\n'
@@ -335,10 +336,11 @@ def _notify_health_change_if_needed(session, prev_status, new_status, details):
 		f'• Статус: {_account_status_emoji(new_status)} <b>{_account_status_title(new_status)}</b>\n'
 		f'• Детали: <code>{_health_details_ru(details)[:500]}</code>'
 	)
-	try:
-		bot.send_message(admin, text, parse_mode='HTML')
-	except Exception:
-		pass
+	for admin_id in sorted(ADMINS):
+		try:
+			bot.send_message(admin_id, text, parse_mode='HTML')
+		except Exception:
+			pass
 
 
 def _process_uploaded_session(chat_id, filename):
@@ -557,7 +559,7 @@ def _step_keyboard():
 
 def _is_admin(user_id):
 	try:
-		return int(user_id) == int(admin)
+		return int(user_id) in ADMINS
 	except Exception:
 		return False
 
@@ -902,7 +904,7 @@ def send_text(message):
 				_deny_access(message.chat.id)
 			return
 		if message.text.lower() == '/admin':
-			if message.chat.id == admin:
+			if _is_admin(message.chat.id):
 				connection = get_main_connection()
 				q = connection.cursor()
 				q.execute('SELECT COUNT(id) FROM ugc_users')

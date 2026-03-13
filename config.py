@@ -26,6 +26,17 @@ login = os.getenv('PROXY_LOGIN', '')
 password = os.getenv('PROXY_PASSWORD', '')
 
 admin = _int_env('ADMIN_ID', 0)
+_admins_raw = os.getenv('ADMIN_IDS', '').strip()
+if _admins_raw:
+    admins = []
+    for item in _admins_raw.split(','):
+        item = item.strip()
+        if item.lstrip('-').isdigit():
+            admins.append(int(item))
+    if admin and admin not in admins:
+        admins.append(int(admin))
+else:
+    admins = [int(admin)] if admin else []
 bot_invite_token = os.getenv('BOT_INVITE_TOKEN', os.getenv('BOT_TOKEN', ''))
 bot_invite_name = os.getenv('BOT_INVITE_NAME', '')
 
