@@ -1856,4 +1856,5 @@ def run_bot_polling():
 			time.sleep(5)
 
 
-run_bot_polling()
+if __name__ == '__main__':
+	run_bot_polling()

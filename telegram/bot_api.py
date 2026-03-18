@@ -88,3 +88,17 @@ class TelegramBotAPI:
 
     def decline_join_request(self, chat_id, user_id):
         return self._request('declineChatJoinRequest', {'chat_id': chat_id, 'user_id': user_id})
+
+    def set_webhook(self, url, secret_token=None, drop_pending_updates=False, allowed_updates=None):
+        payload = {
+            'url': str(url or '').strip(),
+            'drop_pending_updates': bool(drop_pending_updates),
+        }
+        if secret_token:
+            payload['secret_token'] = str(secret_token)
+        if allowed_updates:
+            payload['allowed_updates'] = list(allowed_updates)
+        return self._request('setWebhook', payload)
+
+    def delete_webhook(self, drop_pending_updates=False):
+        return self._request('deleteWebhook', {'drop_pending_updates': bool(drop_pending_updates)})

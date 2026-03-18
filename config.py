@@ -42,6 +42,12 @@ bot_invite_name = os.getenv('BOT_INVITE_NAME', '')
 bot_api_token = os.getenv('BOT_API_TOKEN', bot_invite_token)
 bot_api_base_url = os.getenv('BOT_API_BASE_URL', 'https://api.telegram.org')
 bot_api_timeout = _int_env('BOT_API_TIMEOUT', 30)
+webhook_base_url = os.getenv('WEBHOOK_BASE_URL', '').rstrip('/')
+webhook_path = os.getenv('WEBHOOK_PATH', '/webhook')
+webhook_secret_token = os.getenv('WEBHOOK_SECRET_TOKEN', '')
+port = _int_env('PORT', 8000)
+worker_poll_interval = _int_env('WORKER_POLL_INTERVAL', 15)
+join_request_batch_size = _int_env('JOIN_REQUEST_BATCH_SIZE', 50)
 
 # Telethon credentials
 API_ID = _int_env('TG_API_ID', 0)
