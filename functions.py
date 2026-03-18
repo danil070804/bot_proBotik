@@ -9,6 +9,14 @@ from telethon.sessions import StringSession
 from telethon.crypto import AuthKey
 
 
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+SESSION_JSON_KEYS = (
+    'session', 'string_session', 'session_string', 'string',
+    'telethon_session', 'telethonStringSession', 'stringSession',
+)
+SESSION_JSON_NESTED_KEYS = ('data', 'account', 'telegram', 'client', 'session_data')
+
+
 def get_chats():
     chats = []
     if not os.path.exists(file1):
@@ -65,11 +73,67 @@ def link_convert(chat):
     return t, chat
 
 
+def _resolve_local_path(path):
+    ref = str(path or '').strip()
+    if not ref:
+        return ''
+    if os.path.isabs(ref):
+        return ref
+    return os.path.join(BASE_DIR, ref)
+
+
+def _looks_like_string_session(value):
+    value = str(value or '').strip()
+    if len(value) < 32:
+        return False
+    return not any(ch.isspace() for ch in value)
+
+
+def _extract_string_session_value(data):
+    if isinstance(data, dict):
+        for container in [data] + [data.get(key) for key in SESSION_JSON_NESTED_KEYS if isinstance(data.get(key), dict)]:
+            for key in SESSION_JSON_KEYS:
+                value = container.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+        return ''
+    if isinstance(data, str):
+        return data.strip()
+    return ''
+
+
+def _read_json_session_value(path):
+    with open(_resolve_local_path(path), 'r', encoding='utf-8') as f:
+        raw = f.read().strip()
+    data = None
+    try:
+        data = json.loads(raw)
+    except Exception:
+        data = None
+    value = _extract_string_session_value(data)
+    if not value and data is None and _looks_like_string_session(raw):
+        value = raw
+    return value
+
+
+def _is_session_json_path(path):
+    filename = os.path.basename(str(path or '')).lower()
+    if filename.startswith('progress_'):
+        return False
+    try:
+        return bool(_read_json_session_value(path))
+    except Exception:
+        return False
+
+
 def get_sessions():
     sessions = []
-    sessions.extend(glob('*.session'))
-    sessions.extend(glob('*.json'))
-    return sessions
+    for path in sorted(glob(os.path.join(BASE_DIR, '*.session'))):
+        sessions.append(os.path.basename(path))
+    for path in sorted(glob(os.path.join(BASE_DIR, '*.json'))):
+        if _is_session_json_path(path):
+            sessions.append(os.path.basename(path))
+    return list(dict.fromkeys(sessions))
 
 
 def _dc_endpoint(dc_id):
@@ -85,7 +149,7 @@ def _dc_endpoint(dc_id):
 
 def _read_pyrogram_sqlite_session(path):
     try:
-        conn = sqlite3.connect(path)
+        conn = sqlite3.connect(_resolve_local_path(path))
         cur = conn.cursor()
         cur.execute("SELECT name FROM sqlite_master WHERE type='table'")
         tables = {r[0] for r in cur.fetchall()}
@@ -131,44 +195,14 @@ def _telethon_string_from_pyrogram(path):
 
 def build_telegram_client(session_ref, api_id, api_hash, proxy=None):
     ref = str(session_ref or '').strip()
+    resolved_ref = _resolve_local_path(ref)
     if ref.lower().endswith('.session'):
-        converted = _telethon_string_from_pyrogram(ref)
+        converted = _telethon_string_from_pyrogram(resolved_ref)
         if converted:
             return TelegramClient(StringSession(converted), api_id, api_hash, proxy=proxy)
+        return TelegramClient(resolved_ref, api_id, api_hash, proxy=proxy)
     if ref.lower().endswith('.json'):
-        with open(ref, 'r', encoding='utf-8') as f:
-            raw = f.read().strip()
-        data = None
-        try:
-            data = json.loads(raw)
-        except Exception:
-            data = None
-        if isinstance(data, dict):
-            keys = [
-                'session', 'string_session', 'session_string', 'string',
-                'telethon_session', 'telethonStringSession', 'stringSession'
-            ]
-            value = ''
-            for k in keys:
-                v = data.get(k)
-                if isinstance(v, str) and v.strip():
-                    value = v.strip()
-                    break
-            if not value:
-                for nk in ['data', 'account', 'telegram', 'client', 'session_data']:
-                    nested = data.get(nk)
-                    if isinstance(nested, dict):
-                        for k in keys:
-                            v = nested.get(k)
-                            if isinstance(v, str) and v.strip():
-                                value = v.strip()
-                                break
-                    if value:
-                        break
-        elif isinstance(data, str):
-            value = data.strip()
-        else:
-            value = raw
+        value = _read_json_session_value(resolved_ref)
         if not value:
             raise RuntimeError(
                 f'JSON не содержит StringSession: {ref}. '

@@ -348,17 +348,12 @@ def _process_uploaded_session(chat_id, filename):
 	prev = set_account_health(filename, status, details)
 	_notify_health_change_if_needed(filename, prev, status, details)
 	if status == 'dead':
-		try:
-			if os.path.exists(filename):
-				os.remove(filename)
-		except Exception:
-			pass
-		delete_session_file(filename)
 		bot.send_message(
 			chat_id,
-			f'🗑 <b>Аккаунт удалён автоматически</b>\n'
-			f'Файл: <code>{filename}</code>\n'
-			f'Причина: <code>{_health_details_ru(details)[:300]}</code>',
+			f'⚠️ <b>Аккаунт не прошёл проверку</b>\n'
+			f'Файл сохранён: <code>{filename}</code>\n'
+			f'Причина: <code>{_health_details_ru(details)[:300]}</code>\n\n'
+			'Автоудаление отключено: файл оставлен как есть, удалить его можно вручную из меню аккаунтов.',
 			parse_mode='HTML'
 		)
 		return
