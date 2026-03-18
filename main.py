@@ -422,7 +422,8 @@ def _format_progress_text(item, progress):
 			f'Источник: {progress.get("current_source", "-")}\n'
 			f'Источники: {progress.get("sources_done", 0)}/{progress.get("sources_total", 0)}\n'
 			f'Пользователей: {progress.get("users_parsed", 0)}\n'
-			f'Комментариев: {progress.get("comments_parsed", 0)}'
+			f'Комментариев: {progress.get("comments_parsed", 0)}\n'
+			f'Ошибок: {progress.get("errors", 0)}'
 		)
 	if mode == 'inviter':
 		return (
@@ -473,7 +474,15 @@ def _queue_worker():
 		item = TASK_QUEUE.get()
 		with TASK_LOCK:
 			item['status'] = 'running'
-		proc = subprocess.Popen(item['command'])
+		proc = subprocess.Popen(
+			item['command'],
+			cwd=os.path.dirname(os.path.abspath(__file__)),
+			stdout=subprocess.PIPE,
+			stderr=subprocess.STDOUT,
+			text=True,
+			encoding='utf-8',
+			errors='replace'
+		)
 		item['pid'] = proc.pid
 		item['proc'] = proc
 		try:
@@ -482,12 +491,25 @@ def _queue_worker():
 		except Exception:
 			pass
 		_start_progress_monitor(item)
-		code = proc.wait()
+		output, _ = proc.communicate()
+		code = proc.returncode
+		item['output'] = (output or '').strip()
 		with TASK_LOCK:
 			item['status'] = f'finished ({code})'
 		try:
 			msg_id = item.get('progress_msg_id')
-			_render_inline(item['user_id'], msg_id, f'✅ Завершено: {item["title"]}\nКод: {code}', parse_mode=None)
+			if code == 0:
+				_render_inline(item['user_id'], msg_id, f'✅ Завершено: {item["title"]}\nКод: {code}', parse_mode=None)
+			else:
+				error_text = item.get('output', '')[-1500:].strip()
+				if not error_text:
+					error_text = 'Процесс завершился с ошибкой, но stderr пустой.'
+				_render_inline(
+					item['user_id'],
+					msg_id,
+					f'❌ Ошибка: {item["title"]}\nКод: {code}\n\n{error_text}',
+					parse_mode=None
+				)
 		except Exception:
 			pass
 		TASK_QUEUE.task_done()

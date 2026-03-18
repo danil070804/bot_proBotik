@@ -69,35 +69,41 @@ async def ensure_join(client, target):
 
 async def parse_members(client, target):
     count = 0
-    async for user in client.iter_participants(target):
-        if user and user.username:
-            save_parsed_user(target, user.username, user.id)
-            count += 1
+    try:
+        async for user in client.iter_participants(target):
+            if user and user.username:
+                save_parsed_user(target, user.username, user.id)
+                count += 1
+    except Exception as e:
+        logger.warning(f'Не удалось собрать участников {target}: {e}')
     return count
 
 
 async def parse_comments(client, target, posts_limit, comments_limit):
     comments_saved = 0
-    async for post in client.iter_messages(target, limit=posts_limit):
-        if not post:
-            continue
-        try:
-            async for comment in client.iter_messages(target, reply_to=post.id, limit=comments_limit):
-                if comment and comment.sender_id:
-                    sender = await comment.get_sender()
-                    if sender and getattr(sender, 'username', None):
-                        save_parsed_comment(
-                            target=target,
-                            message_id=post.id,
-                            username=sender.username,
-                            user_id=sender.id,
-                            text=comment.message or '',
-                        )
-                        comments_saved += 1
-        except FloodWaitError as e:
-            await asyncio.sleep(int(e.seconds))
-        except Exception:
-            continue
+    try:
+        async for post in client.iter_messages(target, limit=posts_limit):
+            if not post:
+                continue
+            try:
+                async for comment in client.iter_messages(target, reply_to=post.id, limit=comments_limit):
+                    if comment and comment.sender_id:
+                        sender = await comment.get_sender()
+                        if sender and getattr(sender, 'username', None):
+                            save_parsed_comment(
+                                target=target,
+                                message_id=post.id,
+                                username=sender.username,
+                                user_id=sender.id,
+                                text=comment.message or '',
+                            )
+                            comments_saved += 1
+            except FloodWaitError as e:
+                await asyncio.sleep(int(e.seconds))
+            except Exception:
+                continue
+    except Exception as e:
+        logger.warning(f'Не удалось собрать посты/комментарии {target}: {e}')
     return comments_saved
 
 
@@ -128,9 +134,13 @@ async def run_parser(target, targets_file, posts_limit, comments_limit, session_
         'status': 'running',
         'sources_total': len(targets),
         'sources_done': 0,
+        'sources_failed': 0,
         'users_parsed': 0,
         'comments_parsed': 0,
+        'errors': 0,
         'current_source': '',
+        'active_session': '',
+        'last_error': '',
         'message': 'Parser started',
     }
     _write_progress(progress_file, progress)
@@ -142,22 +152,39 @@ async def run_parser(target, targets_file, posts_limit, comments_limit, session_
         progress['message'] = f'Parsing {src}'
         _write_progress(progress_file, progress)
         sess = selected_sessions[idx % len(selected_sessions)]
-        client = build_telegram_client(sess, API_ID, API_HASH, proxy=proxy)
-        await client.start()
-        users, comments = await parse_target_with_client(client, src, posts_limit, comments_limit)
-        await client.disconnect()
-        total_users += users
-        total_comments += comments
+        progress['active_session'] = sess
+        client = None
+        try:
+            client = build_telegram_client(sess, API_ID, API_HASH, proxy=proxy)
+            await client.start()
+            users, comments = await parse_target_with_client(client, src, posts_limit, comments_limit)
+            total_users += users
+            total_comments += comments
+            progress['message'] = f'Done {src}'
+        except Exception as e:
+            progress['sources_failed'] += 1
+            progress['errors'] += 1
+            progress['last_error'] = f'{src}: {e.__class__.__name__}: {e}'
+            progress['message'] = f'Ошибка в {src}'
+            logger.exception(f'Ошибка парсинга источника {src}')
+        finally:
+            if client:
+                try:
+                    await client.disconnect()
+                except Exception:
+                    pass
         progress['sources_done'] += 1
         progress['users_parsed'] = total_users
         progress['comments_parsed'] = total_comments
-        progress['message'] = f'Done {src}'
         _write_progress(progress_file, progress)
 
-    progress['status'] = 'finished'
-    progress['message'] = 'Parser finished'
+    progress['status'] = 'finished_with_errors' if progress['errors'] else 'finished'
+    progress['message'] = 'Parser finished with errors' if progress['errors'] else 'Parser finished'
     _write_progress(progress_file, progress)
-    logger.info(f'Парсинг завершен: users={total_users}, comments={total_comments}, sources={len(targets)}')
+    logger.info(
+        f'Парсинг завершен: users={total_users}, comments={total_comments}, '
+        f'sources={len(targets)}, errors={progress["errors"]}'
+    )
 
 
 if __name__ == '__main__':
