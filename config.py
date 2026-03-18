@@ -39,6 +39,9 @@ else:
     admins = [int(admin)] if admin else []
 bot_invite_token = os.getenv('BOT_INVITE_TOKEN', os.getenv('BOT_TOKEN', ''))
 bot_invite_name = os.getenv('BOT_INVITE_NAME', '')
+bot_api_token = os.getenv('BOT_API_TOKEN', bot_invite_token)
+bot_api_base_url = os.getenv('BOT_API_BASE_URL', 'https://api.telegram.org')
+bot_api_timeout = _int_env('BOT_API_TIMEOUT', 30)
 
 # Telethon credentials
 API_ID = _int_env('TG_API_ID', 0)

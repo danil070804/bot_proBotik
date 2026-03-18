@@ -34,6 +34,11 @@ from telethon.errors import UserAlreadyParticipantError
 from telethon.tl.functions.channels import JoinChannelRequest
 from telethon.tl.functions.messages import ImportChatInviteRequest
 from functions import get_proxy, get_sessions, build_telegram_client
+from telegram.webhook_handlers import (
+	handle_chat_join_request as process_chat_join_request_update,
+	handle_chat_member_update as process_chat_member_update,
+	handle_message as process_message_update,
+)
 
 from pyqiwip2p import QiwiP2P
 from pyqiwip2p.p2p_types import QiwiCustomer, QiwiDatetime
@@ -986,6 +991,10 @@ def start_message(message):
 def send_text(message):
 	if message.chat.type == 'private':
 		if not _is_admin(message.chat.id):
+			unsubscribe_result = process_message_update(message)
+			if unsubscribe_result:
+				bot.send_message(message.chat.id, 'Вы отписаны от приглашений.')
+				return
 			if message.text.lower() in ['/start', '🎛 меню', 'меню', 'menu']:
 				_deny_access(message.chat.id)
 			return
@@ -1036,6 +1045,22 @@ def send_text(message):
 			return
 		elif _handle_filter_command(message):
 			return
+
+
+@bot.chat_join_request_handler()
+def on_chat_join_request(join_request):
+	try:
+		process_chat_join_request_update(join_request)
+	except Exception as e:
+		print(f'Join request handler error: {e}')
+
+
+@bot.chat_member_handler()
+def on_chat_member_update(chat_member_update):
+	try:
+		process_chat_member_update(chat_member_update)
+	except Exception as e:
+		print(f'Chat member handler error: {e}')
 
 
 @bot.message_handler(content_types=['document'])
@@ -1816,7 +1841,7 @@ def run_bot_polling():
 				timeout=20,
 				long_polling_timeout=20,
 				skip_pending=True,
-				allowed_updates=['message', 'callback_query'],
+				allowed_updates=['message', 'callback_query', 'chat_join_request', 'chat_member', 'my_chat_member'],
 			)
 		except ApiTelegramException as e:
 			# 409 = another process is already calling getUpdates.
