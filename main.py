@@ -430,6 +430,20 @@ def _format_progress_text(item, progress):
 		if last_error:
 			text += f'\nПоследняя ошибка: {last_error[:300]}'
 		return text
+	if mode == 'join_target':
+		text = (
+			f'➕ Вход аккаунтов в цель\n'
+			f'Цель: {progress.get("target", "-")}\n'
+			f'Аккаунт: {progress.get("active_session", "-")}\n'
+			f'Готово: {progress.get("done_accounts", 0)}/{progress.get("total_accounts", 0)}\n'
+			f'Вошли: {progress.get("joined", 0)}\n'
+			f'Уже были: {progress.get("already", 0)}\n'
+			f'Ошибки: {progress.get("failed", 0)}'
+		)
+		last_error = str(progress.get('last_error', '') or '').strip()
+		if last_error:
+			text += f'\nПоследняя ошибка: {last_error[:300]}'
+		return text
 	if mode == 'inviter':
 		return (
 			f'📨 Инвайт в процессе\n'
@@ -515,6 +529,20 @@ def _queue_worker():
 						f'С ошибками: {progress.get("sources_failed", 0)}\n'
 						f'Пользователей: {progress.get("users_parsed", 0)}\n'
 						f'Комментариев: {progress.get("comments_parsed", 0)}'
+					)
+					last_error = str(progress.get('last_error', '') or '').strip()
+					if last_error:
+						text += f'\n\nПоследняя ошибка:\n{last_error[:800]}'
+					_render_inline(item['user_id'], msg_id, text, parse_mode=None)
+				elif progress.get('mode') == 'join_target':
+					text = (
+						f'✅ Завершено: {item["title"]}\n'
+						f'Код: {code}\n'
+						f'Цель: {progress.get("target", "-")}\n'
+						f'Аккаунтов обработано: {progress.get("done_accounts", 0)}/{progress.get("total_accounts", 0)}\n'
+						f'Вошли: {progress.get("joined", 0)}\n'
+						f'Уже были внутри: {progress.get("already", 0)}\n'
+						f'С ошибками: {progress.get("failed", 0)}'
 					)
 					last_error = str(progress.get('last_error', '') or '').strip()
 					if last_error:
@@ -724,6 +752,7 @@ def _flow_title(flow):
 	return {
 		'parser': 'Парсинг',
 		'inviter': 'Инвайт',
+		'join_target': 'Вход в цель',
 		'settings': 'Настройки',
 	}.get(flow, 'Сценарий')
 
@@ -881,6 +910,9 @@ def _build_accounts_menu():
 	keyboard.add(
 		types.InlineKeyboardButton(text='📄 Список аккаунтов', callback_data='accounts_list'),
 		types.InlineKeyboardButton(text='🔍 Проверить аккаунты', callback_data='accounts_check_all'),
+	)
+	keyboard.add(
+		types.InlineKeyboardButton(text='➕ Ввести аккаунты в цель', callback_data='accounts_join_target_start'),
 	)
 	keyboard.add(
 		types.InlineKeyboardButton(text='🗑 Удалить аккаунт', callback_data='accounts_delete_menu'),
@@ -1124,6 +1156,43 @@ def parser_step_comments(message):
 		state.get('panel_msg_id'),
 		f'✅ <b>Парсинг поставлен в очередь</b>\n'
 		f'• Источников: <b>{sources_count}</b>\n'
+		f'• Позиция: <b>~{queue_pos}</b>\n'
+		'Как только задача стартует — покажу живой прогресс.',
+		parse_mode='HTML',
+		reply_markup=build_new_menu()
+	)
+
+
+def join_target_step_target(message):
+	if not _is_admin(message.chat.id):
+		_deny_access(message.chat.id)
+		return
+	state = USER_STATE.get(message.chat.id, {})
+	if state.get('flow') != 'join_target':
+		bot.send_message(message.chat.id, '⚠️ Сейчас неактивен сценарий входа в цель. Нажми кнопку заново.', reply_markup=build_new_menu())
+		return
+	if _is_cancel(message.text):
+		USER_STATE.pop(message.chat.id, None)
+		bot.send_message(message.chat.id, '❌ Действие отменено.', reply_markup=build_new_menu())
+		return
+	target = str(message.text or '').strip()
+	if target == '':
+		bot.send_message(message.chat.id, '⚠️ Цель пустая. Введи @chat, @channel или ссылку-приглашение.', reply_markup=_step_keyboard())
+		return
+	command = [
+		sys.executable, 'target_joiner.py',
+		'--target', target,
+	]
+	progress_file = _progress_file(message.chat.id, 'join_target')
+	command += ['--progress-file', progress_file]
+	queue_pos = _enqueue_process(message.chat.id, 'join target', command, progress_file=progress_file)
+	USER_STATE.pop(message.chat.id, None)
+	_render_inline(
+		message.chat.id,
+		state.get('panel_msg_id'),
+		f'✅ <b>Вход аккаунтов поставлен в очередь</b>\n'
+		f'• Цель: <code>{target}</code>\n'
+		f'• Аккаунтов: <b>{len(list_sessions())}</b>\n'
 		f'• Позиция: <b>~{queue_pos}</b>\n'
 		'Как только задача стартует — покажу живой прогресс.',
 		parse_mode='HTML',
@@ -1432,6 +1501,36 @@ def podcategors(call):
 				bot.send_message(call.message.chat.id, 'Файл уже отсутствует.')
 		except Exception as e:
 			bot.send_message(call.message.chat.id, f'Ошибка удаления: {e}')
+		return
+
+	if call.data == 'accounts_join_target_start':
+		if _has_active_flow(call.message.chat.id):
+			cur = USER_STATE.get(call.message.chat.id, {}).get('flow')
+			_render_inline(
+				call.message.chat.id,
+				call.message.message_id,
+				f'⚠️ Уже активен сценарий: <b>{_flow_title(cur)}</b>.\n'
+				'Чтобы начать новый, сначала отмени текущий.',
+				parse_mode='HTML',
+				reply_markup=_step_keyboard()
+			)
+			return
+		if not _ensure_sessions_or_warn(call.message.chat.id, call.message.message_id):
+			return
+		state = {'flow': 'join_target', 'stage': 'target', 'panel_msg_id': call.message.message_id}
+		USER_STATE[call.message.chat.id] = state
+		_prompt_step(
+			call.message.chat.id,
+			state,
+			'➕ <b>Вход аккаунтов в цель</b>\n'
+			'Отправь цель, куда нужно завести все загруженные аккаунты.\n\n'
+			'Поддерживается:\n'
+			'<code>@channel</code>\n'
+			'<code>@group</code>\n'
+			'<code>https://t.me/...</code>\n'
+			'<code>https://t.me/joinchat/...</code>',
+			join_target_step_target
+		)
 		return
 
 	if call.data == 'parser_start':
