@@ -994,6 +994,53 @@ def unsubscribe_user(user_id, unsubscribed_at=None):
     return get_user(user_id)
 
 
+def list_users(limit=None, include_blacklisted=True, include_unsubscribed=True):
+    clauses = []
+    params = []
+    if not include_blacklisted:
+        clauses.append('is_blacklisted = %s' if IS_POSTGRES else 'is_blacklisted = ?')
+        params.append(False if IS_POSTGRES else 0)
+    if not include_unsubscribed:
+        clauses.append('unsubscribed_at IS NULL')
+    sql_text = 'SELECT * FROM users'
+    if clauses:
+        sql_text += ' WHERE ' + ' AND '.join(clauses)
+    sql_text += ' ORDER BY id DESC'
+    if limit:
+        sql_text += f' LIMIT {"%s" if IS_POSTGRES else "?"}'
+        params.append(int(limit))
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(sql_text, tuple(params))
+        rows = cursor.fetchall()
+        result = _rows_to_dicts(cursor, rows)
+        cursor.close()
+        return result
+
+
+def get_users_summary():
+    summary = {
+        'total': 0,
+        'blacklisted': 0,
+        'unsubscribed': 0,
+        'active': 0,
+    }
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('SELECT COUNT(*) FROM users')
+        summary['total'] = int((cursor.fetchone() or [0])[0] or 0)
+        if IS_POSTGRES:
+            cursor.execute('SELECT COUNT(*) FROM users WHERE is_blacklisted = TRUE')
+        else:
+            cursor.execute('SELECT COUNT(*) FROM users WHERE is_blacklisted = 1')
+        summary['blacklisted'] = int((cursor.fetchone() or [0])[0] or 0)
+        cursor.execute('SELECT COUNT(*) FROM users WHERE unsubscribed_at IS NOT NULL')
+        summary['unsubscribed'] = int((cursor.fetchone() or [0])[0] or 0)
+        summary['active'] = max(0, summary['total'] - summary['blacklisted'] - summary['unsubscribed'])
+        cursor.close()
+    return summary
+
+
 def create_community(
     chat_id,
     title,

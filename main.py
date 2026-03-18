@@ -3,6 +3,7 @@ import telebot
 import datetime
 from telebot import types, apihelper
 from telebot.apihelper import ApiTelegramException
+import csv
 import sqlite3
 import random, string
 import time
@@ -34,6 +35,12 @@ from telethon.errors import UserAlreadyParticipantError
 from telethon.tl.functions.channels import JoinChannelRequest
 from telethon.tl.functions.messages import ImportChatInviteRequest
 from functions import get_proxy, get_sessions, build_telegram_client
+from repositories.campaigns import CampaignRepository
+from repositories.communities import CommunityRepository
+from repositories.join_requests import JoinRequestRepository
+from repositories.users import UserRepository
+from services.campaign_service import CampaignService
+from services.join_request_service import JoinRequestService
 from telegram.webhook_handlers import (
 	handle_chat_join_request as process_chat_join_request_update,
 	handle_chat_member_update as process_chat_member_update,
@@ -49,6 +56,17 @@ bot = telebot.TeleBot(TOKEN)
 admin = config.admin
 ADMINS = set(getattr(config, 'admins', [admin]))
 init_db()
+USER_REPO = UserRepository()
+COMMUNITY_REPO = CommunityRepository()
+CAMPAIGN_REPO = CampaignRepository()
+JOIN_REQUEST_REPO = JoinRequestRepository()
+CAMPAIGN_SERVICE = CampaignService(campaigns=CAMPAIGN_REPO, communities=COMMUNITY_REPO)
+JOIN_REQUEST_SERVICE = JoinRequestService(
+	communities=COMMUNITY_REPO,
+	campaigns=CAMPAIGN_REPO,
+	users=USER_REPO,
+	join_requests=JOIN_REQUEST_REPO,
+)
 
 
 def _restore_session_files():
@@ -78,6 +96,10 @@ DEFAULT_APP_SETTINGS = {
 	'inviter_max_flood_wait': str(config.invite_max_flood_wait),
 	'inviter_use_all_sessions': '1',
 	'account_warmup_days': '2',
+	'campaign_rate_limit_per_minute': '20',
+	'campaign_rate_limit_per_hour': '300',
+	'campaign_max_attempts': '1',
+	'campaign_stop_on_error_rate': '0.30',
 	'active_preset': 'standard',
 }
 PRESET_CONFIGS = {
@@ -91,6 +113,10 @@ PRESET_CONFIGS = {
 		'parser_use_all_sessions': '1',
 		'inviter_use_all_sessions': '1',
 		'account_warmup_days': '3',
+		'campaign_rate_limit_per_minute': '10',
+		'campaign_rate_limit_per_hour': '120',
+		'campaign_max_attempts': '1',
+		'campaign_stop_on_error_rate': '0.15',
 		'active_preset': 'super_safe',
 	},
 	'soft': {
@@ -103,6 +129,10 @@ PRESET_CONFIGS = {
 		'parser_use_all_sessions': '1',
 		'inviter_use_all_sessions': '1',
 		'account_warmup_days': '2',
+		'campaign_rate_limit_per_minute': '15',
+		'campaign_rate_limit_per_hour': '200',
+		'campaign_max_attempts': '1',
+		'campaign_stop_on_error_rate': '0.20',
 		'active_preset': 'soft',
 	},
 	'standard': {
@@ -115,6 +145,10 @@ PRESET_CONFIGS = {
 		'parser_use_all_sessions': '1',
 		'inviter_use_all_sessions': '1',
 		'account_warmup_days': '2',
+		'campaign_rate_limit_per_minute': '20',
+		'campaign_rate_limit_per_hour': '300',
+		'campaign_max_attempts': '1',
+		'campaign_stop_on_error_rate': '0.30',
 		'active_preset': 'standard',
 	},
 	'aggressive': {
@@ -127,6 +161,10 @@ PRESET_CONFIGS = {
 		'parser_use_all_sessions': '1',
 		'inviter_use_all_sessions': '1',
 		'account_warmup_days': '1',
+		'campaign_rate_limit_per_minute': '40',
+		'campaign_rate_limit_per_hour': '600',
+		'campaign_max_attempts': '2',
+		'campaign_stop_on_error_rate': '0.40',
 		'active_preset': 'aggressive',
 	},
 }
@@ -135,21 +173,131 @@ PRESET_CONFIGS = {
 def build_new_menu():
 	keyboard = types.InlineKeyboardMarkup()
 	keyboard.add(
-		types.InlineKeyboardButton(text='🧩 Аккаунты • Session', callback_data='accounts_menu'),
-		types.InlineKeyboardButton(text='🔎 Парсинг • Аудитория', callback_data='parser_start'),
+		types.InlineKeyboardButton(text='📂 Сообщества', callback_data='communities_menu'),
+		types.InlineKeyboardButton(text='👥 Аудитория', callback_data='audience_menu'),
 	)
 	keyboard.add(
-		types.InlineKeyboardButton(text='📨 Инвайт • Добавление', callback_data='inviter_start'),
-		types.InlineKeyboardButton(text='📊 Статус • Live', callback_data='task_status'),
+		types.InlineKeyboardButton(text='🚀 Кампании', callback_data='campaigns_menu'),
+		types.InlineKeyboardButton(text='📨 Заявки', callback_data='join_requests_menu'),
 	)
 	keyboard.add(
-		types.InlineKeyboardButton(text='⚙️ Управление • Процессы', callback_data='manage_menu'),
-		types.InlineKeyboardButton(text='📈 Аналитика • Отчёты', callback_data='stats_overview'),
+		types.InlineKeyboardButton(text='📊 Аналитика', callback_data='stats_overview'),
+		types.InlineKeyboardButton(text='⚙️ Настройки', callback_data='settings_menu'),
 	)
-	keyboard.add(types.InlineKeyboardButton(text='🛡 Фильтры • White/Black', callback_data='filters_menu'))
-	keyboard.add(types.InlineKeyboardButton(text='🛠 Настройки • Парсинг/Инвайт', callback_data='settings_menu'))
-	keyboard.add(types.InlineKeyboardButton(text='ℹ️ Помощь • Гайд', callback_data='help_new'))
+	keyboard.add(types.InlineKeyboardButton(text='ℹ️ Помощь', callback_data='help_new'))
 	return keyboard
+
+
+def _bool_title(value):
+	return 'Да' if str(value).strip().lower() in ['1', 'true', 'yes', 'on'] else 'Нет'
+
+
+def _community_mode_title(mode):
+	return {
+		'invite_link': 'Invite Link',
+		'join_request': 'Join Request',
+		'auto': 'Auto',
+	}.get(str(mode or '').strip(), str(mode or '-'))
+
+
+def _main_dashboard_text():
+	try:
+		communities = COMMUNITY_REPO.list()
+		audience = USER_REPO.summary()
+		campaigns = CAMPAIGN_REPO.list()
+		join_pending = JOIN_REQUEST_REPO.list(status='pending', limit=1000)
+		running = len([c for c in campaigns if c.get('status') == 'running'])
+		scheduled = len([c for c in campaigns if c.get('status') == 'scheduled'])
+		return (
+			'🏠 <b>Invite Platform</b>\n\n'
+			f'📂 Сообщества: <b>{len(communities)}</b>\n'
+			f'👥 Аудитория: <b>{audience.get("total", 0)}</b> '
+			f'(active={audience.get("active", 0)}, blacklist={audience.get("blacklisted", 0)}, unsubscribed={audience.get("unsubscribed", 0)})\n'
+			f'🚀 Кампании: <b>{len(campaigns)}</b> '
+			f'(running={running}, scheduled={scheduled})\n'
+			f'📨 Заявки в ожидании: <b>{len(join_pending)}</b>\n\n'
+			'Новый основной pipeline:\n'
+			'<code>Аудитория -> Кампания -> Invite Link -> Join Request -> Approval</code>'
+		)
+	except Exception as e:
+		return f'🏠 <b>Invite Platform</b>\n\nНе удалось собрать dashboard: <code>{e}</code>'
+
+
+def _communities_text():
+	items = COMMUNITY_REPO.list()
+	lines = [
+		'📂 <b>Сообщества</b>',
+		f'Всего: <b>{len(items)}</b>',
+		'Добавляй чаты/каналы для кампаний, Invite Link и Join Request.',
+	]
+	if items:
+		lines.append('')
+		for item in items[:10]:
+			lines.append(
+				f'• <b>{item.get("title")}</b> '
+				f'(<code>{item.get("chat_id")}</code>) | тип={item.get("type")} | '
+				f'режим={_community_mode_title(item.get("default_invite_mode"))} | '
+				f'auto-approve={_bool_title(item.get("auto_approve_join_requests"))}'
+			)
+	return '\n'.join(lines)
+
+
+def _audience_text():
+	summary = USER_REPO.summary()
+	lines = [
+		'👥 <b>Аудитория</b>',
+		f'Всего пользователей: <b>{summary.get("total", 0)}</b>',
+		f'Активных: <b>{summary.get("active", 0)}</b>',
+		f'Blacklisted: <b>{summary.get("blacklisted", 0)}</b>',
+		f'Unsubscribed: <b>{summary.get("unsubscribed", 0)}</b>',
+		'Поддерживается импорт CSV/JSON и ручное добавление.',
+	]
+	for item in USER_REPO.list(limit=5):
+		lines.append(
+			f'• ID <code>{item.get("id")}</code> | tg=<code>{item.get("telegram_user_id")}</code> | '
+			f'@{item.get("username") or "-"} | {item.get("first_name") or "-"}'
+		)
+	return '\n'.join(lines)
+
+
+def _campaigns_text():
+	items = CAMPAIGN_REPO.list()
+	status_map = {}
+	for item in items:
+		status = str(item.get('status') or 'draft')
+		status_map[status] = status_map.get(status, 0) + 1
+	lines = [
+		'🚀 <b>Кампании</b>',
+		f'Всего: <b>{len(items)}</b>',
+		f'draft={status_map.get("draft", 0)} | scheduled={status_map.get("scheduled", 0)} | running={status_map.get("running", 0)}',
+		f'paused={status_map.get("paused", 0)} | finished={status_map.get("finished", 0)} | failed={status_map.get("failed", 0)}',
+	]
+	for item in items[:8]:
+		lines.append(
+			f'• <b>{item.get("name")}</b> '
+			f'(ID {item.get("id")}) | status={item.get("status")} | '
+			f'mode={_community_mode_title(item.get("invite_mode"))}'
+		)
+	return '\n'.join(lines)
+
+
+def _join_requests_text(status='pending'):
+	items = JOIN_REQUEST_REPO.list(status=status, limit=20)
+	pending = len(JOIN_REQUEST_REPO.list(status='pending', limit=1000))
+	approved = len(JOIN_REQUEST_REPO.list(status='approved', limit=1000))
+	declined = len(JOIN_REQUEST_REPO.list(status='declined', limit=1000))
+	lines = [
+		'📨 <b>Заявки</b>',
+		f'pending=<b>{pending}</b> | approved=<b>{approved}</b> | declined=<b>{declined}</b>',
+		f'Текущий фильтр: <b>{status}</b>',
+	]
+	for item in items:
+		lines.append(
+			f'• ID <code>{item.get("id")}</code> | tg=<code>{item.get("telegram_user_id")}</code> | '
+			f'campaign={item.get("campaign_id") or "-"} | community={item.get("community_id") or "-"} | '
+			f'status={item.get("status")}'
+		)
+	return '\n'.join(lines)
 
 
 def list_sessions():
@@ -711,52 +859,39 @@ def _send_html_chunks(chat_id, header, lines, chunk_size=3500):
 
 def _guide_text():
 	return (
-		'📘 <b>Гайд по функциям Teddy Invite Pro</b>\n\n'
-		'🧩 <b>Аккаунты • Session</b>\n'
-		'• Загружай <code>.session</code> или <code>.json</code> как документ.\n'
-		'• Сразу после загрузки бот делает health-check через Telethon:\n'
-		'  1) подключение к сессии,\n'
-		'  2) проверка авторизации (<code>is_user_authorized()</code>),\n'
-		'  3) получение профиля (<code>get_me()</code>),\n'
-		'  4) при включенной проверке тест-чата — проверка доступа к тест-чату.\n'
-		'• Статусы аккаунта:\n'
-		'  • 🟢 <b>ACTIVE</b> — сессия валидна и готова к работе;\n'
-		'  • 🟠 <b>LIMITED</b> — есть ограничения (Flood/PeerFlood/временные ошибки);\n'
-		'  • 🔴 <b>DEAD</b> — сессия невалидна/разлогин/бан/ревок.\n'
-		'• После успешной загрузки аккаунт ставится на прогрев и не участвует в инвайте до окончания таймера.\n'
-		'• Все статусы хранятся в БД (таблица <code>account_health</code>), есть ручная кнопка «Проверить аккаунты» и фоновый монитор.\n'
-		'• При смене статуса бот отправляет уведомление админу.\n\n'
-		'🔎 <b>Парсинг • Аудитория</b>\n'
-		'• Сбор пользователей из участников и комментариев.\n'
-		'• Работает по одному или нескольким источникам.\n'
-		'• Прогресс показывается в live-режиме без спама.\n\n'
-		'📨 <b>Инвайт • Добавление</b>\n'
-		'• Добавляет пользователей из общей базы парсинга (без повторов по цели).\n'
-		'• Результат по каждому юзеру сохраняется: invited/already/privacy/flood_wait/peer_flood/error.\n'
-		'• При проблемах аккаунта во время инвайта его статус в health автоматически обновляется.\n'
-		'• Показывает live-отчет: сколько обработано и добавлено.\n\n'
-		'🛠 <b>Настройки • Парсинг/Инвайт</b>\n'
-		'• Тонкая настройка лимитов и пауз.\n'
-		'• Пресеты: Мягкий / Стандарт / Агрессивный.\n'
-		'• Все значения сохраняются в базе.\n\n'
-		'⚙️ <b>Управление • Процессы</b>\n'
-		'• Остановить задачу.\n'
-		'• Очистить завершенные задачи.\n\n'
-		'📊 <b>Статус • Live</b>\n'
-		'• Очередь, PID, и текущий прогресс задач.\n\n'
-		'📈 <b>Аналитика • Отчёты</b>\n'
-		'• Сводка по парсингу и результатам инвайта.\n\n'
-		'🛡 <b>Фильтры • White/Black</b>\n'
-		'• Ограничивают источники и пользователей для безопасности.\n'
-		'• Работают и в парсинге, и в инвайте.\n\n'
+		'ℹ️ <b>Invite Platform</b>\n\n'
+		'📂 <b>Сообщества</b>\n'
+		'• Хранят Telegram chat_id, тип сообщества, default mode и auto-approve.\n'
+		'• Используются как цель для invite-link и join-request кампаний.\n\n'
+		'👥 <b>Аудитория</b>\n'
+		'• Ручное добавление пользователей.\n'
+		'• Импорт своей базы через CSV/JSON.\n'
+		'• Поддержка blacklist и unsubscribe.\n\n'
+		'🚀 <b>Кампании</b>\n'
+		'• Создаются поверх аудитории и сообщества.\n'
+		'• Режимы: <code>invite_link</code>, <code>join_request</code>, <code>auto</code>.\n'
+		'• Worker отправляет сообщения со ссылкой, а не делает direct add member.\n\n'
+		'📨 <b>Заявки</b>\n'
+		'• Telegram webhook принимает <code>chat_join_request</code>.\n'
+		'• Заявки сохраняются в БД и могут быть auto-approve или manual approve/decline.\n\n'
+		'📊 <b>Аналитика</b>\n'
+		'• Данные берутся из <code>campaign_recipients</code> и <code>join_requests</code>.\n'
+		'• Основные метрики: sent, failed, join_requested, approved, joined, declined.\n\n'
+		'⚙️ <b>Настройки</b>\n'
+		'• Rate limit per minute/hour.\n'
+		'• Max attempts.\n'
+		'• Stop on error rate.\n'
+		'• Отдельно доступны управление сессиями и процессами как служебные инструменты.\n\n'
 		'💡 <b>Подсказка:</b> на любом шаге нажми «❌ Отменить сценарий» или «⬅️ Назад в меню».'
 	)
 
 
 def _flow_title(flow):
 	return {
-		'parser': 'Парсинг',
-		'inviter': 'Инвайт',
+		'community_add': 'Сообщество',
+		'audience_add': 'Аудитория',
+		'audience_import': 'Импорт аудитории',
+		'campaign_create': 'Кампания',
 		'join_target': 'Вход в цель',
 		'settings': 'Настройки',
 	}.get(flow, 'Сценарий')
@@ -791,6 +926,53 @@ def _prompt_step(chat_id, state, text, handler):
 	else:
 		msg = bot.send_message(chat_id, '✍️ Введи ответ следующим сообщением:', reply_markup=_step_keyboard())
 		bot.register_next_step_handler(msg, handler)
+
+
+def _parse_bool_value(value):
+	return str(value or '').strip().lower() in ['1', 'true', 'yes', 'on', 'y']
+
+
+def _import_users_from_bytes(filename, data):
+	name = str(filename or '').lower()
+	if name.endswith('.csv'):
+		text = bytes(data).decode('utf-8-sig', errors='replace')
+		rows = list(csv.DictReader(text.splitlines()))
+	elif name.endswith('.json'):
+		payload = json.loads(bytes(data).decode('utf-8-sig', errors='replace'))
+		if isinstance(payload, dict):
+			rows = payload.get('users', [])
+		elif isinstance(payload, list):
+			rows = payload
+		else:
+			raise RuntimeError('JSON должен содержать список пользователей')
+	else:
+		raise RuntimeError('Поддерживаются только .csv и .json')
+	imported = 0
+	for row in rows:
+		if not isinstance(row, dict):
+			continue
+		telegram_user_id = row.get('telegram_user_id') or row.get('user_id') or row.get('id')
+		if telegram_user_id in [None, '']:
+			continue
+		try:
+			telegram_user_id = int(str(telegram_user_id).strip())
+		except Exception:
+			continue
+		tags = row.get('tags') or []
+		if isinstance(tags, str):
+			tags = [part.strip() for part in tags.split(',') if part.strip()]
+		USER_REPO.upsert(
+			telegram_user_id=telegram_user_id,
+			username=str(row.get('username') or '').strip().lstrip('@'),
+			first_name=str(row.get('first_name') or '').strip(),
+			source=str(row.get('source') or '').strip(),
+			consent_status=str(row.get('consent_status') or 'imported').strip(),
+			tags=tags,
+			is_blacklisted=_parse_bool_value(row.get('is_blacklisted')),
+			unsubscribed_at=row.get('unsubscribed_at') or None,
+		)
+		imported += 1
+	return imported
 
 
 def _get_setting(key):
@@ -830,14 +1012,10 @@ def _setting_bool(key):
 
 def _setting_title(key):
 	titles = {
-		'parser_posts_limit': 'Лимит постов для парсинга',
-		'parser_comments_limit': 'Лимит комментариев для парсинга',
-		'parser_use_all_sessions': 'Использовать все аккаунты в парсинге',
-		'inviter_limit': 'Лимит пользователей за запуск инвайта',
-		'inviter_sleep': 'Пауза между инвайтами (сек)',
-		'inviter_per_account_limit': 'Лимит добавлений на 1 аккаунт',
-		'inviter_max_flood_wait': 'Максимальный FloodWait (сек)',
-		'inviter_use_all_sessions': 'Использовать все аккаунты в инвайте',
+		'campaign_rate_limit_per_minute': 'Rate limit в минуту',
+		'campaign_rate_limit_per_hour': 'Rate limit в час',
+		'campaign_max_attempts': 'Максимум попыток доставки',
+		'campaign_stop_on_error_rate': 'Стоп по error-rate',
 		'account_warmup_days': 'Дней прогрева после загрузки',
 	}
 	return titles.get(key, key)
@@ -863,13 +1041,11 @@ def _apply_preset(name):
 
 def _settings_text():
 	return (
-		'⚙️ Настройки парсинга и инвайта\n'
+		'⚙️ Настройки платформы\n'
 		f'• Активный пресет: <b>{_preset_title(_get_setting("active_preset"))}</b>\n'
-		f'• Парсинг: постов={_setting_int("parser_posts_limit")}, комментариев={_setting_int("parser_comments_limit")}, '
-		f'все аккаунты={"ВКЛ" if _setting_bool("parser_use_all_sessions") else "ВЫКЛ"}\n'
-		f'• Инвайт: лимит={_setting_int("inviter_limit")}, пауза={_setting_int("inviter_sleep")}с, '
-		f'на аккаунт={_setting_int("inviter_per_account_limit")}, flood={_setting_int("inviter_max_flood_wait")}с, '
-		f'все аккаунты={"ВКЛ" if _setting_bool("inviter_use_all_sessions") else "ВЫКЛ"}\n'
+		f'• Rate limit: {_setting_int("campaign_rate_limit_per_minute")}/мин, {_setting_int("campaign_rate_limit_per_hour")}/час\n'
+		f'• Max attempts: {_setting_int("campaign_max_attempts")}\n'
+		f'• Stop on error rate: {_get_setting("campaign_stop_on_error_rate")}\n'
 		f'• Прогрев аккаунтов: {_setting_int("account_warmup_days")} дн.'
 	)
 
@@ -883,23 +1059,143 @@ def _build_settings_menu():
 	)
 	keyboard.add(types.InlineKeyboardButton(text='🔴 Пресет: Агрессивный', callback_data='settings_preset|aggressive'))
 	keyboard.add(
-		types.InlineKeyboardButton(text='✏️ Посты (парсинг)', callback_data='settings_edit|parser_posts_limit'),
-		types.InlineKeyboardButton(text='✏️ Комментарии (парсинг)', callback_data='settings_edit|parser_comments_limit'),
-	)
-	keyboard.add(types.InlineKeyboardButton(text='🔁 Все аккаунты (парсинг)', callback_data='settings_toggle|parser_use_all_sessions'))
-	keyboard.add(
-		types.InlineKeyboardButton(text='✏️ Лимит (инвайт)', callback_data='settings_edit|inviter_limit'),
-		types.InlineKeyboardButton(text='✏️ Пауза (инвайт)', callback_data='settings_edit|inviter_sleep'),
+		types.InlineKeyboardButton(text='✏️ Лимит / мин', callback_data='settings_edit|campaign_rate_limit_per_minute'),
+		types.InlineKeyboardButton(text='✏️ Лимит / час', callback_data='settings_edit|campaign_rate_limit_per_hour'),
 	)
 	keyboard.add(
-		types.InlineKeyboardButton(text='✏️ Лимит на аккаунт', callback_data='settings_edit|inviter_per_account_limit'),
-		types.InlineKeyboardButton(text='✏️ Макс. FloodWait', callback_data='settings_edit|inviter_max_flood_wait'),
+		types.InlineKeyboardButton(text='✏️ Max attempts', callback_data='settings_edit|campaign_max_attempts'),
+		types.InlineKeyboardButton(text='✏️ Error-rate', callback_data='settings_edit|campaign_stop_on_error_rate'),
 	)
 	keyboard.add(types.InlineKeyboardButton(text='🕒 Дни прогрева аккаунтов', callback_data='settings_edit|account_warmup_days'))
-	keyboard.add(types.InlineKeyboardButton(text='🔁 Все аккаунты (инвайт)', callback_data='settings_toggle|inviter_use_all_sessions'))
+	keyboard.add(
+		types.InlineKeyboardButton(text='🧩 Аккаунты', callback_data='accounts_menu'),
+		types.InlineKeyboardButton(text='⚙️ Процессы', callback_data='manage_menu'),
+	)
 	keyboard.add(types.InlineKeyboardButton(text='♻️ Сброс по умолчанию', callback_data='settings_reset'))
 	keyboard.add(types.InlineKeyboardButton(text='⬅️ Назад', callback_data='main_menu'))
 	return keyboard
+
+
+def _build_communities_menu():
+	keyboard = types.InlineKeyboardMarkup()
+	keyboard.add(
+		types.InlineKeyboardButton(text='➕ Добавить', callback_data='community_add_start'),
+		types.InlineKeyboardButton(text='📋 Список', callback_data='communities_list'),
+	)
+	keyboard.add(types.InlineKeyboardButton(text='⬅️ Назад', callback_data='main_menu'))
+	return keyboard
+
+
+def _build_audience_menu():
+	keyboard = types.InlineKeyboardMarkup()
+	keyboard.add(
+		types.InlineKeyboardButton(text='➕ Добавить', callback_data='audience_add_start'),
+		types.InlineKeyboardButton(text='⬆️ Импорт CSV/JSON', callback_data='audience_import_start'),
+	)
+	keyboard.add(
+		types.InlineKeyboardButton(text='📋 Список', callback_data='audience_list'),
+		types.InlineKeyboardButton(text='🚫 Blacklist', callback_data='audience_blacklist_list'),
+	)
+	keyboard.add(types.InlineKeyboardButton(text='⬅️ Назад', callback_data='main_menu'))
+	return keyboard
+
+
+def _build_campaigns_menu():
+	keyboard = types.InlineKeyboardMarkup()
+	keyboard.add(
+		types.InlineKeyboardButton(text='➕ Создать', callback_data='campaign_create_start'),
+		types.InlineKeyboardButton(text='📋 Список', callback_data='campaigns_list'),
+	)
+	keyboard.add(types.InlineKeyboardButton(text='⬅️ Назад', callback_data='main_menu'))
+	return keyboard
+
+
+def _build_join_requests_menu():
+	keyboard = types.InlineKeyboardMarkup()
+	keyboard.add(
+		types.InlineKeyboardButton(text='🕒 Pending', callback_data='join_requests_view|pending'),
+		types.InlineKeyboardButton(text='✅ Approved', callback_data='join_requests_view|approved'),
+	)
+	keyboard.add(
+		types.InlineKeyboardButton(text='❌ Declined', callback_data='join_requests_view|declined'),
+		types.InlineKeyboardButton(text='🔁 Обновить', callback_data='join_requests_menu'),
+	)
+	keyboard.add(types.InlineKeyboardButton(text='⬅️ Назад', callback_data='main_menu'))
+	return keyboard
+
+
+def _parse_yes_no(value):
+	text = str(value or '').strip().lower()
+	if text in ['да', 'yes', 'y', '1', 'true', 'on']:
+		return True
+	if text in ['нет', 'no', 'n', '0', 'false', 'off']:
+		return False
+	raise ValueError('Ожидается да/нет')
+
+
+def _build_campaign_actions(campaign_id):
+	keyboard = types.InlineKeyboardMarkup()
+	keyboard.add(
+		types.InlineKeyboardButton(text='▶️ Запланировать', callback_data=f'campaign_start|{campaign_id}'),
+		types.InlineKeyboardButton(text='⏸ Пауза', callback_data=f'campaign_pause|{campaign_id}'),
+	)
+	keyboard.add(
+		types.InlineKeyboardButton(text='🔄 Возобновить', callback_data=f'campaign_resume|{campaign_id}'),
+		types.InlineKeyboardButton(text='🛑 Отменить', callback_data=f'campaign_cancel|{campaign_id}'),
+	)
+	keyboard.add(types.InlineKeyboardButton(text='⬅️ Назад', callback_data='campaigns_menu'))
+	return keyboard
+
+
+def _campaign_detail_text(campaign_id):
+	campaign = CAMPAIGN_REPO.get(campaign_id)
+	if not campaign:
+		return 'Кампания не найдена.'
+	stats = CAMPAIGN_REPO.get_stats(campaign_id)
+	community = COMMUNITY_REPO.get(campaign.get('community_id'))
+	return (
+		f'🚀 <b>{campaign.get("name")}</b>\n'
+		f'ID: <code>{campaign_id}</code>\n'
+		f'Статус: <b>{campaign.get("status")}</b>\n'
+		f'Сообщество: <b>{(community or {}).get("title", "-")}</b>\n'
+		f'Режим: <b>{_community_mode_title(campaign.get("invite_mode"))}</b>\n'
+		f'Rate: {campaign.get("rate_limit_per_minute")}/мин, {campaign.get("rate_limit_per_hour")}/час\n'
+		f'Max attempts: {campaign.get("max_attempts")}\n\n'
+		f'Получателей: <b>{stats.get("total", 0)}</b>\n'
+		f'sent={stats.get("sent", 0)} | failed={stats.get("failed", 0)} | '
+		f'join_requested={stats.get("join_requested", 0)}\n'
+		f'approved={stats.get("approved", 0)} | joined={stats.get("joined", 0)} | declined={stats.get("declined", 0)}'
+	)
+
+
+def _build_user_actions(user_id):
+	user = USER_REPO.get(user_id)
+	keyboard = types.InlineKeyboardMarkup()
+	keyboard.add(
+		types.InlineKeyboardButton(
+			text='✅ Убрать blacklist' if user and user.get('is_blacklisted') else '🚫 В blacklist',
+			callback_data=f'audience_toggle_blacklist|{user_id}'
+		),
+		types.InlineKeyboardButton(text='✉️ Unsubscribe', callback_data=f'audience_unsubscribe|{user_id}'),
+	)
+	keyboard.add(types.InlineKeyboardButton(text='⬅️ Назад', callback_data='audience_menu'))
+	return keyboard
+
+
+def _user_detail_text(user_id):
+	user = USER_REPO.get(user_id)
+	if not user:
+		return 'Пользователь не найден.'
+	return (
+		f'👤 <b>{user.get("first_name") or "-"}</b>\n'
+		f'ID: <code>{user.get("id")}</code>\n'
+		f'Telegram ID: <code>{user.get("telegram_user_id")}</code>\n'
+		f'Username: <code>@{user.get("username") or "-"}</code>\n'
+		f'Source: <code>{user.get("source") or "-"}</code>\n'
+		f'Consent: <b>{user.get("consent_status") or "-"}</b>\n'
+		f'Blacklisted: <b>{_bool_title(user.get("is_blacklisted"))}</b>\n'
+		f'Unsubscribed: <b>{"Да" if user.get("unsubscribed_at") else "Нет"}</b>'
+	)
 
 
 def _build_manage_menu():
@@ -928,25 +1224,43 @@ def _build_accounts_menu():
 
 def _stats_text():
 	try:
-		connection = get_main_connection()
-		q = connection.cursor()
-		q.execute('SELECT COUNT(*) FROM parsed_usernames')
-		parsed_users = q.fetchone()[0] or 0
-		q.execute('SELECT COUNT(*) FROM parsed_comments')
-		parsed_comments = q.fetchone()[0] or 0
-		q.execute('SELECT status, COUNT(*) FROM invited_users GROUP BY status')
-		rows = q.fetchall()
-		status_map = {r[0]: r[1] for r in rows}
-		connection.close()
+		campaigns = CAMPAIGN_REPO.list()
+		join_requests = JOIN_REQUEST_REPO.list(limit=5000)
+		total_stats = {
+			'sent': 0,
+			'delivered': 0,
+			'failed': 0,
+			'join_requested': 0,
+			'approved': 0,
+			'joined': 0,
+			'declined': 0,
+			'total': 0,
+		}
+		for campaign in campaigns:
+			stats = CAMPAIGN_REPO.get_stats(campaign['id'])
+			for key in total_stats:
+				total_stats[key] += int(stats.get(key, 0) or 0)
+		jr_status = {}
+		for row in join_requests:
+			status = str(row.get('status') or 'pending')
+			jr_status[status] = jr_status.get(status, 0) + 1
+		audience = USER_REPO.summary()
 		return (
-			f'📈 Аналитика:\n'
-			f'Юзернеймов в базе: {parsed_users}\n'
-			f'Комментариев в базе: {parsed_comments}\n'
-			f'Успешно добавлено: {status_map.get("invited", 0)}\n'
-			f'Уже в чате/канале: {status_map.get("already", 0)}\n'
-			f'Приватность (запрет): {status_map.get("privacy", 0)}\n'
-			f'Flood/PeerFlood: {status_map.get("flood_wait", 0) + status_map.get("peer_flood", 0)}\n'
-			f'Ошибки: {status_map.get("error", 0)}'
+			f'📊 <b>Аналитика платформы</b>\n'
+			f'Сообществ: <b>{len(COMMUNITY_REPO.list())}</b>\n'
+			f'Пользователей: <b>{audience.get("total", 0)}</b>\n'
+			f'Кампаний: <b>{len(campaigns)}</b>\n'
+			f'Получателей: <b>{total_stats.get("total", 0)}</b>\n\n'
+			f'✉️ sent: <b>{total_stats.get("sent", 0)}</b>\n'
+			f'📬 delivered: <b>{total_stats.get("delivered", 0)}</b>\n'
+			f'🕒 join_requested: <b>{total_stats.get("join_requested", 0)}</b>\n'
+			f'✅ approved: <b>{total_stats.get("approved", 0)}</b>\n'
+			f'👤 joined: <b>{total_stats.get("joined", 0)}</b>\n'
+			f'❌ declined: <b>{total_stats.get("declined", 0)}</b>\n'
+			f'⚠️ failed: <b>{total_stats.get("failed", 0)}</b>\n\n'
+			f'Join requests: pending=<b>{jr_status.get("pending", 0)}</b>, '
+			f'approved=<b>{jr_status.get("approved", 0)}</b>, '
+			f'declined=<b>{jr_status.get("declined", 0)}</b>'
 		)
 	except Exception as e:
 		return f'Не удалось собрать аналитику: {e}'
@@ -985,7 +1299,7 @@ def start_message(message):
 			bot.send_message(message.chat.id,f'💡 Перед началом использования сервиса, пожалуйста, ознакомьтесь со статьей: https://telegra.ph/Informaciya-po-proektu-10-29',parse_mode='HTML',reply_markup=keyboard, disable_web_page_preview=True)
 
 		bot.send_message(message.chat.id, '👑 Добро пожаловать в <b>Teddy Invite Pro</b>.', parse_mode='HTML', reply_markup=keyboards.main)
-		bot.send_message(message.chat.id, '✨ Панель управления готова. Выберите действие ниже:', parse_mode='HTML', reply_markup=build_new_menu())
+		bot.send_message(message.chat.id, _main_dashboard_text(), parse_mode='HTML', reply_markup=build_new_menu())
 
 @bot.message_handler(content_types=['text'])
 def send_text(message):
@@ -1038,10 +1352,10 @@ def send_text(message):
 👣Очередь: {chat_no_send}''',parse_mode='HTML', reply_markup=keyboard)
 
 		elif message.text.lower() == '🎛 меню':
-			bot.send_message(message.chat.id, '✨ Выберите действие:', parse_mode='HTML', reply_markup=build_new_menu())
+			bot.send_message(message.chat.id, _main_dashboard_text(), parse_mode='HTML', reply_markup=build_new_menu())
 			return
 		elif message.text.lower() in ['фильтры', 'filters']:
-			bot.send_message(message.chat.id, _filters_text(), parse_mode='HTML', reply_markup=build_new_menu())
+			bot.send_message(message.chat.id, 'Фильтры выведены из основного продукта. Для ограничений используй blacklist/unsubscribe в разделе «Аудитория».', reply_markup=build_new_menu())
 			return
 		elif _handle_filter_command(message):
 			return
@@ -1071,12 +1385,31 @@ def receive_session_file(message):
 		_deny_access(message.chat.id)
 		return
 	doc = message.document
-	if not doc or not str(doc.file_name).lower().endswith(('.session', '.json')):
-		bot.send_message(message.chat.id, 'Нужен файл формата .session или .json (как документ).')
+	state = USER_STATE.get(message.chat.id, {})
+	if not doc:
 		return
 	file_info = bot.get_file(doc.file_id)
 	data = bot.download_file(file_info.file_path)
 	filename = os.path.basename(doc.file_name)
+	if state.get('flow') == 'audience_import':
+		if not str(filename).lower().endswith(('.csv', '.json')):
+			bot.send_message(message.chat.id, 'Для импорта аудитории нужен файл .csv или .json.')
+			return
+		try:
+			imported = _import_users_from_bytes(filename, data)
+			USER_STATE.pop(message.chat.id, None)
+			bot.send_message(
+				message.chat.id,
+				f'✅ Импорт аудитории завершён.\nЗагружено пользователей: <b>{imported}</b>',
+				parse_mode='HTML',
+				reply_markup=build_new_menu()
+			)
+		except Exception as e:
+			bot.send_message(message.chat.id, f'Ошибка импорта аудитории: {e}', reply_markup=build_new_menu())
+		return
+	if not str(filename).lower().endswith(('.session', '.json')):
+		bot.send_message(message.chat.id, 'Нужен файл формата .session или .json (как документ).')
+		return
 	save_session_file(filename, data)
 	with open(filename, 'wb') as f:
 		f.write(data)
@@ -1086,6 +1419,396 @@ def receive_session_file(message):
 		f'⏳ Файл <code>{filename}</code> загружен.\n'
 		f'Добавлен в очередь обработки: <b>~{queue_pos}</b>.\n'
 		'Можно отправлять следующие файлы — обработаю по очереди.',
+		parse_mode='HTML'
+	)
+
+
+def community_add_step_title(message):
+	if not _is_admin(message.chat.id):
+		_deny_access(message.chat.id)
+		return
+	state = USER_STATE.get(message.chat.id, {})
+	if state.get('flow') != 'community_add':
+		return
+	if _is_cancel(message.text):
+		USER_STATE.pop(message.chat.id, None)
+		bot.send_message(message.chat.id, '❌ Добавление сообщества отменено.', reply_markup=build_new_menu())
+		return
+	state['title'] = str(message.text or '').strip()
+	state['stage'] = 'chat_id'
+	_prompt_step(
+		message.chat.id,
+		state,
+		'📂 <b>Сообщество • Шаг 2/6</b>\nВведи числовой <code>chat_id</code> Telegram.',
+		community_add_step_chat_id
+	)
+
+
+def community_add_step_chat_id(message):
+	if not _is_admin(message.chat.id):
+		_deny_access(message.chat.id)
+		return
+	state = USER_STATE.get(message.chat.id, {})
+	if state.get('flow') != 'community_add':
+		return
+	if _is_cancel(message.text):
+		USER_STATE.pop(message.chat.id, None)
+		bot.send_message(message.chat.id, '❌ Добавление сообщества отменено.', reply_markup=build_new_menu())
+		return
+	try:
+		state['chat_id'] = int(str(message.text).strip())
+	except Exception:
+		bot.send_message(message.chat.id, 'Нужен числовой chat_id.')
+		_prompt_step(message.chat.id, state, 'Повтори <code>chat_id</code> сообщества.', community_add_step_chat_id)
+		return
+	state['stage'] = 'type'
+	_prompt_step(
+		message.chat.id,
+		state,
+		'📂 <b>Сообщество • Шаг 3/6</b>\nУкажи тип: <code>group</code> или <code>channel</code>.',
+		community_add_step_type
+	)
+
+
+def community_add_step_type(message):
+	if not _is_admin(message.chat.id):
+		_deny_access(message.chat.id)
+		return
+	state = USER_STATE.get(message.chat.id, {})
+	if state.get('flow') != 'community_add':
+		return
+	if _is_cancel(message.text):
+		USER_STATE.pop(message.chat.id, None)
+		bot.send_message(message.chat.id, '❌ Добавление сообщества отменено.', reply_markup=build_new_menu())
+		return
+	community_type = str(message.text or '').strip().lower()
+	if community_type not in ['group', 'channel']:
+		bot.send_message(message.chat.id, 'Тип должен быть <code>group</code> или <code>channel</code>.', parse_mode='HTML')
+		_prompt_step(message.chat.id, state, 'Повтори тип: <code>group</code> / <code>channel</code>.', community_add_step_type)
+		return
+	state['community_type'] = community_type
+	state['stage'] = 'mode'
+	_prompt_step(
+		message.chat.id,
+		state,
+		'📂 <b>Сообщество • Шаг 4/6</b>\nУкажи режим по умолчанию: <code>invite_link</code>, <code>join_request</code> или <code>auto</code>.',
+		community_add_step_mode
+	)
+
+
+def community_add_step_mode(message):
+	if not _is_admin(message.chat.id):
+		_deny_access(message.chat.id)
+		return
+	state = USER_STATE.get(message.chat.id, {})
+	if state.get('flow') != 'community_add':
+		return
+	if _is_cancel(message.text):
+		USER_STATE.pop(message.chat.id, None)
+		bot.send_message(message.chat.id, '❌ Добавление сообщества отменено.', reply_markup=build_new_menu())
+		return
+	mode = str(message.text or '').strip().lower()
+	if mode not in ['invite_link', 'join_request', 'auto']:
+		bot.send_message(message.chat.id, 'Режим должен быть invite_link / join_request / auto.')
+		_prompt_step(message.chat.id, state, 'Повтори режим по умолчанию.', community_add_step_mode)
+		return
+	state['default_invite_mode'] = mode
+	state['stage'] = 'auto_approve'
+	_prompt_step(
+		message.chat.id,
+		state,
+		'📂 <b>Сообщество • Шаг 5/6</b>\nАвтоодобрение заявок? Ответь: <code>да</code> / <code>нет</code>.',
+		community_add_step_auto
+	)
+
+
+def community_add_step_auto(message):
+	if not _is_admin(message.chat.id):
+		_deny_access(message.chat.id)
+		return
+	state = USER_STATE.get(message.chat.id, {})
+	if state.get('flow') != 'community_add':
+		return
+	if _is_cancel(message.text):
+		USER_STATE.pop(message.chat.id, None)
+		bot.send_message(message.chat.id, '❌ Добавление сообщества отменено.', reply_markup=build_new_menu())
+		return
+	try:
+		state['auto_approve_join_requests'] = _parse_yes_no(message.text)
+	except Exception:
+		bot.send_message(message.chat.id, 'Ответь: да / нет.')
+		_prompt_step(message.chat.id, state, 'Автоодобрение заявок? <code>да</code> / <code>нет</code>.', community_add_step_auto)
+		return
+	state['stage'] = 'strict_moderation'
+	_prompt_step(
+		message.chat.id,
+		state,
+		'📂 <b>Сообщество • Шаг 6/6</b>\nСтрогая модерация? Ответь: <code>да</code> / <code>нет</code>.',
+		community_add_step_strict
+	)
+
+
+def community_add_step_strict(message):
+	if not _is_admin(message.chat.id):
+		_deny_access(message.chat.id)
+		return
+	state = USER_STATE.get(message.chat.id, {})
+	if state.get('flow') != 'community_add':
+		return
+	if _is_cancel(message.text):
+		USER_STATE.pop(message.chat.id, None)
+		bot.send_message(message.chat.id, '❌ Добавление сообщества отменено.', reply_markup=build_new_menu())
+		return
+	try:
+		strict = _parse_yes_no(message.text)
+	except Exception:
+		bot.send_message(message.chat.id, 'Ответь: да / нет.')
+		_prompt_step(message.chat.id, state, 'Строгая модерация? <code>да</code> / <code>нет</code>.', community_add_step_strict)
+		return
+	community = COMMUNITY_REPO.create(
+		chat_id=state['chat_id'],
+		title=state['title'],
+		community_type=state['community_type'],
+		default_invite_mode=state['default_invite_mode'],
+		auto_approve_join_requests=state['auto_approve_join_requests'],
+		strict_moderation=strict,
+		is_active=True,
+	)
+	USER_STATE.pop(message.chat.id, None)
+	_render_inline(
+		message.chat.id,
+		state.get('panel_msg_id'),
+		f'✅ <b>Сообщество добавлено</b>\n'
+		f'ID: <code>{community.get("id")}</code>\n'
+		f'Название: <b>{community.get("title")}</b>\n'
+		f'chat_id: <code>{community.get("chat_id")}</code>\n'
+		f'Режим: <b>{_community_mode_title(community.get("default_invite_mode"))}</b>',
+		reply_markup=_build_communities_menu(),
+		parse_mode='HTML'
+	)
+
+
+def audience_add_step_tg_id(message):
+	if not _is_admin(message.chat.id):
+		_deny_access(message.chat.id)
+		return
+	state = USER_STATE.get(message.chat.id, {})
+	if state.get('flow') != 'audience_add':
+		return
+	if _is_cancel(message.text):
+		USER_STATE.pop(message.chat.id, None)
+		bot.send_message(message.chat.id, '❌ Добавление пользователя отменено.', reply_markup=build_new_menu())
+		return
+	try:
+		state['telegram_user_id'] = int(str(message.text).strip())
+	except Exception:
+		bot.send_message(message.chat.id, 'Нужен числовой Telegram user id.')
+		_prompt_step(message.chat.id, state, 'Повтори Telegram user id.', audience_add_step_tg_id)
+		return
+	state['stage'] = 'username'
+	_prompt_step(
+		message.chat.id,
+		state,
+		'👥 <b>Аудитория • Шаг 2/4</b>\nВведи username без <code>@</code> или <code>-</code>.',
+		audience_add_step_username
+	)
+
+
+def audience_add_step_username(message):
+	if not _is_admin(message.chat.id):
+		_deny_access(message.chat.id)
+		return
+	state = USER_STATE.get(message.chat.id, {})
+	if state.get('flow') != 'audience_add':
+		return
+	if _is_cancel(message.text):
+		USER_STATE.pop(message.chat.id, None)
+		bot.send_message(message.chat.id, '❌ Добавление пользователя отменено.', reply_markup=build_new_menu())
+		return
+	value = str(message.text or '').strip()
+	state['username'] = '' if value == '-' else value.lstrip('@')
+	state['stage'] = 'first_name'
+	_prompt_step(
+		message.chat.id,
+		state,
+		'👥 <b>Аудитория • Шаг 3/4</b>\nВведи first_name.',
+		audience_add_step_first_name
+	)
+
+
+def audience_add_step_first_name(message):
+	if not _is_admin(message.chat.id):
+		_deny_access(message.chat.id)
+		return
+	state = USER_STATE.get(message.chat.id, {})
+	if state.get('flow') != 'audience_add':
+		return
+	if _is_cancel(message.text):
+		USER_STATE.pop(message.chat.id, None)
+		bot.send_message(message.chat.id, '❌ Добавление пользователя отменено.', reply_markup=build_new_menu())
+		return
+	state['first_name'] = str(message.text or '').strip()
+	state['stage'] = 'source'
+	_prompt_step(
+		message.chat.id,
+		state,
+		'👥 <b>Аудитория • Шаг 4/4</b>\nВведи source пользователя или <code>manual</code>.',
+		audience_add_step_source
+	)
+
+
+def audience_add_step_source(message):
+	if not _is_admin(message.chat.id):
+		_deny_access(message.chat.id)
+		return
+	state = USER_STATE.get(message.chat.id, {})
+	if state.get('flow') != 'audience_add':
+		return
+	if _is_cancel(message.text):
+		USER_STATE.pop(message.chat.id, None)
+		bot.send_message(message.chat.id, '❌ Добавление пользователя отменено.', reply_markup=build_new_menu())
+		return
+	user = USER_REPO.upsert(
+		telegram_user_id=state['telegram_user_id'],
+		username=state.get('username', ''),
+		first_name=state.get('first_name', ''),
+		source=str(message.text or '').strip() or 'manual',
+		consent_status='manual',
+		tags=[],
+	)
+	USER_STATE.pop(message.chat.id, None)
+	_render_inline(
+		message.chat.id,
+		state.get('panel_msg_id'),
+		f'✅ <b>Пользователь добавлен</b>\n'
+		f'ID: <code>{user.get("id")}</code>\n'
+		f'Telegram ID: <code>{user.get("telegram_user_id")}</code>\n'
+		f'Username: <code>@{user.get("username") or "-"}</code>',
+		reply_markup=_build_audience_menu(),
+		parse_mode='HTML'
+	)
+
+
+def campaign_create_step_name(message):
+	if not _is_admin(message.chat.id):
+		_deny_access(message.chat.id)
+		return
+	state = USER_STATE.get(message.chat.id, {})
+	if state.get('flow') != 'campaign_create':
+		return
+	if _is_cancel(message.text):
+		USER_STATE.pop(message.chat.id, None)
+		bot.send_message(message.chat.id, '❌ Создание кампании отменено.', reply_markup=build_new_menu())
+		return
+	state['name'] = str(message.text or '').strip()
+	state['stage'] = 'community_id'
+	communities = COMMUNITY_REPO.list()
+	if not communities:
+		USER_STATE.pop(message.chat.id, None)
+		bot.send_message(message.chat.id, 'Сначала добавь хотя бы одно сообщество.', reply_markup=build_new_menu())
+		return
+	lines = ['🚀 <b>Кампания • Шаг 2/4</b>', 'Выбери community_id из списка:']
+	for item in communities[:15]:
+		lines.append(f'• <code>{item.get("id")}</code> — {item.get("title")} ({item.get("chat_id")})')
+	_prompt_step(message.chat.id, state, '\n'.join(lines), campaign_create_step_community)
+
+
+def campaign_create_step_community(message):
+	if not _is_admin(message.chat.id):
+		_deny_access(message.chat.id)
+		return
+	state = USER_STATE.get(message.chat.id, {})
+	if state.get('flow') != 'campaign_create':
+		return
+	if _is_cancel(message.text):
+		USER_STATE.pop(message.chat.id, None)
+		bot.send_message(message.chat.id, '❌ Создание кампании отменено.', reply_markup=build_new_menu())
+		return
+	try:
+		community_id = int(str(message.text).strip())
+	except Exception:
+		bot.send_message(message.chat.id, 'Нужен числовой community_id.')
+		_prompt_step(message.chat.id, state, 'Повтори community_id.', campaign_create_step_community)
+		return
+	community = COMMUNITY_REPO.get(community_id)
+	if not community:
+		bot.send_message(message.chat.id, 'Сообщество не найдено.')
+		_prompt_step(message.chat.id, state, 'Повтори community_id из списка.', campaign_create_step_community)
+		return
+	state['community_id'] = community_id
+	state['stage'] = 'invite_mode'
+	_prompt_step(
+		message.chat.id,
+		state,
+		'🚀 <b>Кампания • Шаг 3/4</b>\n'
+		'Укажи режим: <code>invite_link</code>, <code>join_request</code> или <code>auto</code>.\n'
+		'Аудитория по умолчанию: вся активная база.',
+		campaign_create_step_mode
+	)
+
+
+def campaign_create_step_mode(message):
+	if not _is_admin(message.chat.id):
+		_deny_access(message.chat.id)
+		return
+	state = USER_STATE.get(message.chat.id, {})
+	if state.get('flow') != 'campaign_create':
+		return
+	if _is_cancel(message.text):
+		USER_STATE.pop(message.chat.id, None)
+		bot.send_message(message.chat.id, '❌ Создание кампании отменено.', reply_markup=build_new_menu())
+		return
+	mode = str(message.text or '').strip().lower()
+	if mode not in ['invite_link', 'join_request', 'auto']:
+		bot.send_message(message.chat.id, 'Режим должен быть invite_link / join_request / auto.')
+		_prompt_step(message.chat.id, state, 'Повтори режим кампании.', campaign_create_step_mode)
+		return
+	state['invite_mode'] = mode
+	state['stage'] = 'message_template'
+	_prompt_step(
+		message.chat.id,
+		state,
+		'🚀 <b>Кампания • Шаг 4/4</b>\n'
+		'Введи шаблон сообщения.\n'
+		'Доступные переменные: <code>{first_name}</code>, <code>{username}</code>, <code>{community_title}</code>, <code>{invite_link}</code>, <code>{campaign_name}</code>.',
+		campaign_create_step_message
+	)
+
+
+def campaign_create_step_message(message):
+	if not _is_admin(message.chat.id):
+		_deny_access(message.chat.id)
+		return
+	state = USER_STATE.get(message.chat.id, {})
+	if state.get('flow') != 'campaign_create':
+		return
+	if _is_cancel(message.text):
+		USER_STATE.pop(message.chat.id, None)
+		bot.send_message(message.chat.id, '❌ Создание кампании отменено.', reply_markup=build_new_menu())
+		return
+	recipients = [row['id'] for row in USER_REPO.list(include_blacklisted=False, include_unsubscribed=False)]
+	if not recipients:
+		USER_STATE.pop(message.chat.id, None)
+		bot.send_message(message.chat.id, 'В активной аудитории нет пользователей для кампании.', reply_markup=build_new_menu())
+		return
+	campaign = CAMPAIGN_SERVICE.create_campaign(
+		name=state['name'],
+		community_id=state['community_id'],
+		invite_mode=state['invite_mode'],
+		message_template=str(message.text or '').strip(),
+		rate_limit_per_minute=_setting_int('campaign_rate_limit_per_minute'),
+		rate_limit_per_hour=_setting_int('campaign_rate_limit_per_hour'),
+		max_attempts=_setting_int('campaign_max_attempts'),
+		stop_on_error_rate=float(str(_get_setting('campaign_stop_on_error_rate') or '0.30').replace(',', '.')),
+		created_by=message.chat.id,
+		recipients=recipients,
+	)
+	USER_STATE.pop(message.chat.id, None)
+	_render_inline(
+		message.chat.id,
+		state.get('panel_msg_id'),
+		'✅ <b>Кампания создана</b>\n\n' + _campaign_detail_text(campaign['id']),
+		reply_markup=_build_campaign_actions(campaign['id']),
 		parse_mode='HTML'
 	)
 
@@ -1339,8 +2062,14 @@ def settings_value_step(message):
 		bot.send_message(message.chat.id, 'Сессия настройки потеряна. Открой настройки заново.', reply_markup=build_new_menu())
 		return
 	val = str(message.text).strip()
-	if not val.isdigit():
-		bot.send_message(message.chat.id, 'Нужно ввести целое число. Попробуйте ещё раз.', reply_markup=_step_keyboard())
+	try:
+		if key == 'campaign_stop_on_error_rate':
+			float(val.replace(',', '.'))
+			val = val.replace(',', '.')
+		else:
+			int(val)
+	except Exception:
+		bot.send_message(message.chat.id, 'Некорректное значение. Попробуйте ещё раз.', reply_markup=_step_keyboard())
 		return
 	_set_setting(key, val)
 	USER_STATE.pop(message.chat.id, None)
@@ -1368,15 +2097,251 @@ def podcategors(call):
 
 	if call.data == 'main_menu':
 		USER_STATE.pop(call.message.chat.id, None)
-		_render_inline(call.message.chat.id, call.message.message_id, '✨ Главное меню:', reply_markup=build_new_menu(), parse_mode=None)
+		_render_inline(call.message.chat.id, call.message.message_id, _main_dashboard_text(), reply_markup=build_new_menu(), parse_mode='HTML')
 		return
 
 	if call.data == 'settings_menu':
 		_render_inline(call.message.chat.id, call.message.message_id, _settings_text(), parse_mode='HTML', reply_markup=_build_settings_menu())
 		return
 
+	if call.data == 'communities_menu':
+		_render_inline(call.message.chat.id, call.message.message_id, _communities_text(), parse_mode='HTML', reply_markup=_build_communities_menu())
+		return
+
+	if call.data == 'communities_list':
+		_render_inline(call.message.chat.id, call.message.message_id, _communities_text(), parse_mode='HTML', reply_markup=_build_communities_menu())
+		return
+
+	if call.data == 'community_add_start':
+		if _has_active_flow(call.message.chat.id):
+			cur = USER_STATE.get(call.message.chat.id, {}).get('flow')
+			_render_inline(
+				call.message.chat.id,
+				call.message.message_id,
+				f'⚠️ Уже активен сценарий: <b>{_flow_title(cur)}</b>.\nЧтобы начать новый, сначала отмени текущий.',
+				parse_mode='HTML',
+				reply_markup=_step_keyboard()
+			)
+			return
+		state = {'flow': 'community_add', 'stage': 'title', 'panel_msg_id': call.message.message_id}
+		USER_STATE[call.message.chat.id] = state
+		_prompt_step(
+			call.message.chat.id,
+			state,
+			'📂 <b>Сообщество • Шаг 1/6</b>\nВведи название сообщества.',
+			community_add_step_title
+		)
+		return
+
+	if call.data == 'audience_menu':
+		_render_inline(call.message.chat.id, call.message.message_id, _audience_text(), parse_mode='HTML', reply_markup=_build_audience_menu())
+		return
+
+	if call.data == 'audience_add_start':
+		if _has_active_flow(call.message.chat.id):
+			cur = USER_STATE.get(call.message.chat.id, {}).get('flow')
+			_render_inline(
+				call.message.chat.id,
+				call.message.message_id,
+				f'⚠️ Уже активен сценарий: <b>{_flow_title(cur)}</b>.\nЧтобы начать новый, сначала отмени текущий.',
+				parse_mode='HTML',
+				reply_markup=_step_keyboard()
+			)
+			return
+		state = {'flow': 'audience_add', 'stage': 'telegram_user_id', 'panel_msg_id': call.message.message_id}
+		USER_STATE[call.message.chat.id] = state
+		_prompt_step(
+			call.message.chat.id,
+			state,
+			'👥 <b>Аудитория • Шаг 1/4</b>\nВведи числовой Telegram user id.',
+			audience_add_step_tg_id
+		)
+		return
+
+	if call.data == 'audience_import_start':
+		if _has_active_flow(call.message.chat.id):
+			cur = USER_STATE.get(call.message.chat.id, {}).get('flow')
+			_render_inline(
+				call.message.chat.id,
+				call.message.message_id,
+				f'⚠️ Уже активен сценарий: <b>{_flow_title(cur)}</b>.\nЧтобы начать новый, сначала отмени текущий.',
+				parse_mode='HTML',
+				reply_markup=_step_keyboard()
+			)
+			return
+		USER_STATE[call.message.chat.id] = {'flow': 'audience_import', 'panel_msg_id': call.message.message_id}
+		_render_inline(
+			call.message.chat.id,
+			call.message.message_id,
+			'⬆️ <b>Импорт аудитории</b>\nОтправь файл <code>.csv</code> или <code>.json</code> документом.\n\n'
+			'Поддерживаемые поля:\n'
+			'<code>telegram_user_id,username,first_name,source,consent_status,tags,is_blacklisted,unsubscribed_at</code>',
+			parse_mode='HTML',
+			reply_markup=_step_keyboard()
+		)
+		return
+
+	if call.data == 'audience_list':
+		users = USER_REPO.list(limit=12)
+		keyboard = types.InlineKeyboardMarkup()
+		for user in users:
+			label = f'👤 @{user.get("username") or user.get("telegram_user_id")} ({user.get("id")})'
+			keyboard.add(types.InlineKeyboardButton(text=label[:60], callback_data=f'audience_user|{user.get("id")}'))
+		keyboard.add(types.InlineKeyboardButton(text='⬅️ Назад', callback_data='audience_menu'))
+		_render_inline(call.message.chat.id, call.message.message_id, _audience_text(), parse_mode='HTML', reply_markup=keyboard)
+		return
+
+	if call.data == 'audience_blacklist_list':
+		users = USER_REPO.list(limit=12)
+		keyboard = types.InlineKeyboardMarkup()
+		for user in users:
+			marker = '✅' if user.get('is_blacklisted') else '🚫'
+			keyboard.add(
+				types.InlineKeyboardButton(
+					text=f'{marker} @{user.get("username") or user.get("telegram_user_id")} ({user.get("id")})'[:60],
+					callback_data=f'audience_toggle_blacklist|{user.get("id")}'
+				)
+			)
+		keyboard.add(types.InlineKeyboardButton(text='⬅️ Назад', callback_data='audience_menu'))
+		_render_inline(call.message.chat.id, call.message.message_id, '🚫 <b>Blacklist аудитории</b>\nНажми на пользователя, чтобы переключить статус.', parse_mode='HTML', reply_markup=keyboard)
+		return
+
+	if call.data.startswith('audience_user|'):
+		user_id = int(call.data.split('|', 1)[1])
+		_render_inline(call.message.chat.id, call.message.message_id, _user_detail_text(user_id), parse_mode='HTML', reply_markup=_build_user_actions(user_id))
+		return
+
+	if call.data.startswith('audience_toggle_blacklist|'):
+		user_id = int(call.data.split('|', 1)[1])
+		user = USER_REPO.get(user_id)
+		if not user:
+			bot.send_message(call.message.chat.id, 'Пользователь не найден.')
+			return
+		USER_REPO.blacklist(user_id, is_blacklisted=not bool(user.get('is_blacklisted')))
+		_render_inline(call.message.chat.id, call.message.message_id, _user_detail_text(user_id), parse_mode='HTML', reply_markup=_build_user_actions(user_id))
+		return
+
+	if call.data.startswith('audience_unsubscribe|'):
+		user_id = int(call.data.split('|', 1)[1])
+		USER_REPO.unsubscribe(user_id)
+		_render_inline(call.message.chat.id, call.message.message_id, _user_detail_text(user_id), parse_mode='HTML', reply_markup=_build_user_actions(user_id))
+		return
+
+	if call.data == 'campaigns_menu':
+		_render_inline(call.message.chat.id, call.message.message_id, _campaigns_text(), parse_mode='HTML', reply_markup=_build_campaigns_menu())
+		return
+
+	if call.data == 'campaigns_list':
+		items = CAMPAIGN_REPO.list()
+		keyboard = types.InlineKeyboardMarkup()
+		for item in items[:12]:
+			keyboard.add(
+				types.InlineKeyboardButton(
+					text=f'🚀 {item.get("name")} [{item.get("status")}]'[:60],
+					callback_data=f'campaign_view|{item.get("id")}'
+				)
+			)
+		keyboard.add(types.InlineKeyboardButton(text='⬅️ Назад', callback_data='campaigns_menu'))
+		_render_inline(call.message.chat.id, call.message.message_id, _campaigns_text(), parse_mode='HTML', reply_markup=keyboard)
+		return
+
+	if call.data == 'campaign_create_start':
+		if _has_active_flow(call.message.chat.id):
+			cur = USER_STATE.get(call.message.chat.id, {}).get('flow')
+			_render_inline(
+				call.message.chat.id,
+				call.message.message_id,
+				f'⚠️ Уже активен сценарий: <b>{_flow_title(cur)}</b>.\nЧтобы начать новый, сначала отмени текущий.',
+				parse_mode='HTML',
+				reply_markup=_step_keyboard()
+			)
+			return
+		if not COMMUNITY_REPO.list():
+			bot.send_message(call.message.chat.id, 'Сначала добавь хотя бы одно сообщество.', reply_markup=build_new_menu())
+			return
+		if USER_REPO.summary().get('active', 0) <= 0:
+			bot.send_message(call.message.chat.id, 'Сначала добавь аудиторию.', reply_markup=build_new_menu())
+			return
+		state = {'flow': 'campaign_create', 'stage': 'name', 'panel_msg_id': call.message.message_id}
+		USER_STATE[call.message.chat.id] = state
+		_prompt_step(
+			call.message.chat.id,
+			state,
+			'🚀 <b>Кампания • Шаг 1/4</b>\nВведи название кампании.',
+			campaign_create_step_name
+		)
+		return
+
+	if call.data.startswith('campaign_view|'):
+		campaign_id = int(call.data.split('|', 1)[1])
+		_render_inline(call.message.chat.id, call.message.message_id, _campaign_detail_text(campaign_id), parse_mode='HTML', reply_markup=_build_campaign_actions(campaign_id))
+		return
+
+	if call.data.startswith('campaign_start|'):
+		campaign_id = int(call.data.split('|', 1)[1])
+		CAMPAIGN_SERVICE.start_campaign(campaign_id)
+		_render_inline(call.message.chat.id, call.message.message_id, _campaign_detail_text(campaign_id) + '\n\n🕒 Кампания переведена в scheduled. Worker подхватит её автоматически.', parse_mode='HTML', reply_markup=_build_campaign_actions(campaign_id))
+		return
+
+	if call.data.startswith('campaign_pause|'):
+		campaign_id = int(call.data.split('|', 1)[1])
+		CAMPAIGN_SERVICE.pause_campaign(campaign_id)
+		_render_inline(call.message.chat.id, call.message.message_id, _campaign_detail_text(campaign_id), parse_mode='HTML', reply_markup=_build_campaign_actions(campaign_id))
+		return
+
+	if call.data.startswith('campaign_resume|'):
+		campaign_id = int(call.data.split('|', 1)[1])
+		CAMPAIGN_SERVICE.resume_campaign(campaign_id)
+		_render_inline(call.message.chat.id, call.message.message_id, _campaign_detail_text(campaign_id), parse_mode='HTML', reply_markup=_build_campaign_actions(campaign_id))
+		return
+
+	if call.data.startswith('campaign_cancel|'):
+		campaign_id = int(call.data.split('|', 1)[1])
+		CAMPAIGN_SERVICE.cancel_campaign(campaign_id)
+		_render_inline(call.message.chat.id, call.message.message_id, _campaign_detail_text(campaign_id), parse_mode='HTML', reply_markup=_build_campaign_actions(campaign_id))
+		return
+
+	if call.data == 'join_requests_menu':
+		_render_inline(call.message.chat.id, call.message.message_id, _join_requests_text('pending'), parse_mode='HTML', reply_markup=_build_join_requests_menu())
+		return
+
+	if call.data.startswith('join_requests_view|'):
+		status = call.data.split('|', 1)[1]
+		keyboard = types.InlineKeyboardMarkup()
+		for item in JOIN_REQUEST_REPO.list(status=status, limit=10):
+			if status == 'pending':
+				keyboard.add(
+					types.InlineKeyboardButton(text=f'✅ {item.get("id")}', callback_data=f'join_request_approve|{item.get("id")}'),
+					types.InlineKeyboardButton(text=f'❌ {item.get("id")}', callback_data=f'join_request_decline|{item.get("id")}')
+				)
+			else:
+				keyboard.add(types.InlineKeyboardButton(text=f'ID {item.get("id")} | tg {item.get("telegram_user_id")}', callback_data='join_requests_menu'))
+		keyboard.add(types.InlineKeyboardButton(text='⬅️ Назад', callback_data='join_requests_menu'))
+		_render_inline(call.message.chat.id, call.message.message_id, _join_requests_text(status), parse_mode='HTML', reply_markup=keyboard)
+		return
+
+	if call.data.startswith('join_request_approve|'):
+		join_request_id = int(call.data.split('|', 1)[1])
+		try:
+			JOIN_REQUEST_SERVICE.approve_join_request(join_request_id, moderator_id=call.from_user.id, reason='manual_approve')
+			bot.answer_callback_query(call.id, 'Заявка одобрена')
+		except Exception as e:
+			bot.answer_callback_query(call.id, f'Ошибка: {e}')
+		_render_inline(call.message.chat.id, call.message.message_id, _join_requests_text('pending'), parse_mode='HTML', reply_markup=_build_join_requests_menu())
+		return
+
+	if call.data.startswith('join_request_decline|'):
+		join_request_id = int(call.data.split('|', 1)[1])
+		try:
+			JOIN_REQUEST_SERVICE.decline_join_request(join_request_id, moderator_id=call.from_user.id, reason='manual_decline')
+			bot.answer_callback_query(call.id, 'Заявка отклонена')
+		except Exception as e:
+			bot.answer_callback_query(call.id, f'Ошибка: {e}')
+		_render_inline(call.message.chat.id, call.message.message_id, _join_requests_text('pending'), parse_mode='HTML', reply_markup=_build_join_requests_menu())
+		return
+
 	if call.data == 'filters_menu':
-		_render_inline(call.message.chat.id, call.message.message_id, _filters_text(), parse_mode='HTML', reply_markup=build_new_menu())
+		_render_inline(call.message.chat.id, call.message.message_id, 'Фильтры выведены из основного меню. Используй blacklist/unsubscribe в разделе «Аудитория».', parse_mode='HTML', reply_markup=build_new_menu())
 		return
 
 	if call.data == 'settings_reset':
