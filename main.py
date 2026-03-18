@@ -417,14 +417,19 @@ def _progress_file(user_id, task_type):
 def _format_progress_text(item, progress):
 	mode = progress.get('mode', '')
 	if mode == 'parser':
-		return (
+		text = (
 			f'🔎 Парсинг в процессе\n'
 			f'Источник: {progress.get("current_source", "-")}\n'
+			f'Аккаунт: {progress.get("active_session", "-")}\n'
 			f'Источники: {progress.get("sources_done", 0)}/{progress.get("sources_total", 0)}\n'
 			f'Пользователей: {progress.get("users_parsed", 0)}\n'
 			f'Комментариев: {progress.get("comments_parsed", 0)}\n'
 			f'Ошибок: {progress.get("errors", 0)}'
 		)
+		last_error = str(progress.get('last_error', '') or '').strip()
+		if last_error:
+			text += f'\nПоследняя ошибка: {last_error[:300]}'
+		return text
 	if mode == 'inviter':
 		return (
 			f'📨 Инвайт в процессе\n'
@@ -452,6 +457,7 @@ def _start_progress_monitor(item):
 				if os.path.exists(progress_file):
 					with open(progress_file, 'r', encoding='utf-8') as f:
 						progress = json.load(f)
+					item['last_progress'] = progress
 					text = _format_progress_text(item, progress)
 					if text != last_snapshot:
 						msg_id = item.get('progress_msg_id')
@@ -499,7 +505,23 @@ def _queue_worker():
 		try:
 			msg_id = item.get('progress_msg_id')
 			if code == 0:
-				_render_inline(item['user_id'], msg_id, f'✅ Завершено: {item["title"]}\nКод: {code}', parse_mode=None)
+				progress = item.get('last_progress') or {}
+				if progress.get('mode') == 'parser':
+					text = (
+						f'✅ Завершено: {item["title"]}\n'
+						f'Код: {code}\n'
+						f'Источники: {progress.get("sources_done", 0)}/{progress.get("sources_total", 0)}\n'
+						f'Успешно: {max(0, progress.get("sources_done", 0) - progress.get("sources_failed", 0))}\n'
+						f'С ошибками: {progress.get("sources_failed", 0)}\n'
+						f'Пользователей: {progress.get("users_parsed", 0)}\n'
+						f'Комментариев: {progress.get("comments_parsed", 0)}'
+					)
+					last_error = str(progress.get('last_error', '') or '').strip()
+					if last_error:
+						text += f'\n\nПоследняя ошибка:\n{last_error[:800]}'
+					_render_inline(item['user_id'], msg_id, text, parse_mode=None)
+				else:
+					_render_inline(item['user_id'], msg_id, f'✅ Завершено: {item["title"]}\nКод: {code}', parse_mode=None)
 			else:
 				error_text = item.get('output', '')[-1500:].strip()
 				if not error_text:
