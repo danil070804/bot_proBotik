@@ -11,6 +11,13 @@ def _int_env(name, default):
         return int(default)
 
 
+def _str_env(name, default=''):
+    value = os.getenv(name, default)
+    if value is None:
+        return ''
+    return str(value).strip()
+
+
 max_flood = _int_env('MAX_FLOOD', 999)
 file1 = os.getenv('CHATS_FILE', 'uslug.txt')
 full_chats = _int_env('FULL_CHATS', 30)
@@ -42,9 +49,16 @@ bot_invite_name = os.getenv('BOT_INVITE_NAME', '')
 bot_api_token = os.getenv('BOT_API_TOKEN', bot_invite_token)
 bot_api_base_url = os.getenv('BOT_API_BASE_URL', 'https://api.telegram.org')
 bot_api_timeout = _int_env('BOT_API_TIMEOUT', 30)
-webhook_base_url = os.getenv('WEBHOOK_BASE_URL', '').rstrip('/')
+webhook_base_url = _str_env('WEBHOOK_BASE_URL').rstrip('/')
 webhook_path = os.getenv('WEBHOOK_PATH', '/webhook')
-webhook_secret_token = os.getenv('WEBHOOK_SECRET_TOKEN', '')
+webhook_secret_token = _str_env('WEBHOOK_SECRET_TOKEN')
+_bot_transport_raw = _str_env('BOT_TRANSPORT').lower()
+if _bot_transport_raw in {'polling', 'webhook'}:
+    bot_transport = _bot_transport_raw
+elif webhook_base_url:
+    bot_transport = 'webhook'
+else:
+    bot_transport = 'polling'
 port = _int_env('PORT', 8000)
 worker_poll_interval = _int_env('WORKER_POLL_INTERVAL', 15)
 join_request_batch_size = _int_env('JOIN_REQUEST_BATCH_SIZE', 50)

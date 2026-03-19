@@ -3879,6 +3879,11 @@ def new_data(message):
 		bot.send_message(message.chat.id, 'Отменили',parse_mode='HTML', reply_markup=keyboard)
 
 def run_bot_polling():
+	transport = str(getattr(config, 'bot_transport', 'polling') or 'polling').strip().lower()
+	if transport != 'polling':
+		print(f'Polling skipped: BOT_TRANSPORT={transport}. Start webhook.py for Telegram updates.')
+		return
+
 	# Reset webhook mode to avoid clashes between webhook and long polling.
 	_ensure_account_monitor()
 	try:
