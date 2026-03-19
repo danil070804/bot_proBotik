@@ -28,7 +28,7 @@ from db import (
 	get_main_connection, init_db, get_app_setting, set_app_setting,
 	add_source_filter, remove_source_filter, get_source_filters,
 	add_user_filter, remove_user_filter, get_user_filters,
-	get_account_health_record, set_account_health, set_account_warmup, get_account_warmup_remaining,
+	get_account_health_record, list_account_health_records, set_account_health, set_account_warmup, get_account_warmup_remaining, get_account_warmup_remaining_map,
 	save_session_file, delete_session_file, get_session_files
 )
 from telethon.errors import UserAlreadyParticipantError
@@ -277,6 +277,10 @@ def _is_favorite(entity_type, entity_id):
 
 
 def _recent_platform_highlights():
+	return _recent_platform_highlights_from_rows(_account_rows())
+
+
+def _recent_platform_highlights_from_rows(account_rows):
 	items = []
 	last_task = next(iter(PARSE_TASK_REPO.list(limit=1)), None)
 	if last_task:
@@ -291,7 +295,6 @@ def _recent_platform_highlights():
 		items.append(
 			f'{_parser_mode_title(last_task.get("mode"))} / {_parse_task_sources_count(last_task)} источника — {status}'
 		)
-	account_rows = _account_rows()
 	problem_count = len([row for row in account_rows if row.get('status') in {'limited', 'flooded', 'dead', 'invalid'}])
 	if problem_count:
 		items.append(f'Проверка аккаунтов — {problem_count} проблемных')
@@ -309,8 +312,12 @@ def _active_runtime_tasks_count():
 
 
 def _build_error_entries(chat_id):
+	return _build_error_entries_from_rows(chat_id, _account_rows())
+
+
+def _build_error_entries_from_rows(chat_id, account_rows):
 	entries = []
-	for row in _account_rows():
+	for row in account_rows:
 		if row.get('status') not in {'limited', 'flooded', 'dead', 'invalid'}:
 			continue
 		entries.append(
@@ -448,7 +455,8 @@ def _main_dashboard_text():
 		audience = AUDIENCE_REPO.summary()
 		parse_summary = PARSE_TASK_REPO.summary()
 		campaigns = CAMPAIGN_REPO.list()
-		total_errors = len(_build_error_entries(admin))
+		account_rows = _account_rows()
+		total_errors = len(_build_error_entries_from_rows(admin, account_rows))
 		active_tasks = _active_runtime_tasks_count()
 		stats = [
 			('Аккаунты', len(list_sessions()), ' 🟢'),
@@ -457,7 +465,7 @@ def _main_dashboard_text():
 			('Активных задач', active_tasks or int(parse_summary.get('running', 0) or 0) + int(parse_summary.get('queued', 0) or 0)),
 			('Ошибки', total_errors),
 		]
-		highlights = _recent_platform_highlights()
+		highlights = _recent_platform_highlights_from_rows(account_rows)
 		if total_errors:
 			highlights.append(f'Есть проблемные зоны: {total_errors}. Рекомендуем открыть центр ошибок.')
 		footer = 'Выбери раздел:' if _is_compact_mode() else 'Выбери раздел или быстрый сценарий ниже.'
@@ -682,9 +690,12 @@ def _session_username(details):
 
 
 def _account_rows():
+	sessions = list_sessions()
+	health_map = list_account_health_records(sessions)
+	warmup_map = get_account_warmup_remaining_map(sessions)
 	rows = []
-	for index, session in enumerate(list_sessions()):
-		record = get_account_health_record(session)
+	for index, session in enumerate(sessions):
+		record = health_map.get(session) or get_account_health_record(session)
 		rows.append(
 			{
 				'index': index,
@@ -698,7 +709,7 @@ def _account_rows():
 				'is_deleted': record.get('is_deleted'),
 				'dialogs_check_ok': record.get('dialogs_check_ok'),
 				'entity_check_ok': record.get('entity_check_ok'),
-				'warmup': get_account_warmup_remaining(session),
+				'warmup': int(warmup_map.get(session) or 0),
 			}
 		)
 	return rows

@@ -1,4 +1,6 @@
-from fastapi import FastAPI, Header, HTTPException, Request
+import logging
+
+from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request
 from telebot import types
 
 import config
@@ -10,6 +12,7 @@ WEBHOOK_PATH = config.webhook_path if str(config.webhook_path).startswith('/') e
 WEBHOOK_ALLOWED_UPDATES = ['message', 'callback_query', 'chat_join_request', 'chat_member', 'my_chat_member']
 
 app = FastAPI(title='Telegram Webhook', version='1.0.0')
+logger = logging.getLogger(__name__)
 
 
 def _webhook_url():
@@ -28,17 +31,25 @@ async def health():
     }
 
 
+def _process_webhook_update(payload):
+    try:
+        update = types.Update.de_json(payload)
+        bot.process_new_updates([update])
+    except Exception:
+        logger.exception('Webhook processing failed')
+
+
 @app.post(WEBHOOK_PATH)
-async def telegram_webhook(request: Request, x_telegram_bot_api_secret_token: str | None = Header(default=None)):
+async def telegram_webhook(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    x_telegram_bot_api_secret_token: str | None = Header(default=None),
+):
     expected_secret = str(config.webhook_secret_token or '').strip()
     if expected_secret and x_telegram_bot_api_secret_token != expected_secret:
         raise HTTPException(status_code=401, detail='Invalid Telegram webhook secret')
     payload = await request.json()
-    try:
-        update = types.Update.de_json(payload)
-        bot.process_new_updates([update])
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f'Webhook processing failed: {exc}') from exc
+    background_tasks.add_task(_process_webhook_update, payload)
     return {'ok': True}
 
 

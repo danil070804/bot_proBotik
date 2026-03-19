@@ -1022,6 +1022,86 @@ def get_account_health_record(session):
             'last_check': str(row[10] or ''),
         }
 
+
+def list_account_health_records(sessions=None):
+    session_list = [str(item or '').strip() for item in (sessions or []) if str(item or '').strip()]
+    defaults = {
+        session: {
+            'session': session,
+            'status': 'invalid',
+            'details': '',
+            'reason_code': 'not_checked',
+            'reason_text': 'Проверка аккаунта ещё не выполнялась',
+            'me_username': '',
+            'me_id': None,
+            'is_deleted': False,
+            'dialogs_check_ok': False,
+            'entity_check_ok': False,
+            'last_check': '',
+        }
+        for session in session_list
+    }
+    if not session_list:
+        return defaults
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        placeholders = ', '.join(['%s'] * len(session_list)) if IS_POSTGRES else ', '.join(['?'] * len(session_list))
+        query = (
+            'SELECT session, status, details, reason_code, reason_text, me_username, me_id, '
+            'is_deleted, dialogs_check_ok, entity_check_ok, last_check '
+            f'FROM account_health WHERE session IN ({placeholders})'
+        )
+        cursor.execute(query, tuple(session_list))
+        rows = cursor.fetchall()
+        cursor.close()
+    result = dict(defaults)
+    for row in rows:
+        session = str(row[0] or '').strip()
+        if not session:
+            continue
+        result[session] = {
+            'session': session,
+            'status': _normalize_account_health_status(row[1]),
+            'details': row[2] or '',
+            'reason_code': row[3] or '',
+            'reason_text': row[4] or row[2] or '',
+            'me_username': row[5] or '',
+            'me_id': row[6],
+            'is_deleted': bool(row[7]),
+            'dialogs_check_ok': bool(row[8]),
+            'entity_check_ok': bool(row[9]),
+            'last_check': str(row[10] or ''),
+        }
+    return result
+
+
+def get_account_warmup_remaining_map(sessions=None):
+    session_list = [str(item or '').strip() for item in (sessions or []) if str(item or '').strip()]
+    result = {session: 0 for session in session_list}
+    if not session_list:
+        return result
+    keys = [f'warmup_until:{session}' for session in session_list]
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        placeholders = ', '.join(['%s'] * len(keys)) if IS_POSTGRES else ', '.join(['?'] * len(keys))
+        query = f'SELECT key, value FROM app_settings WHERE key IN ({placeholders})'
+        cursor.execute(query, tuple(keys))
+        rows = cursor.fetchall()
+        cursor.close()
+    import time as _time
+    now_ts = int(_time.time())
+    for key, value in rows:
+        raw_key = str(key or '')
+        if not raw_key.startswith('warmup_until:'):
+            continue
+        session = raw_key.split(':', 1)[1]
+        try:
+            until_ts = int(value)
+        except Exception:
+            until_ts = 0
+        result[session] = max(0, until_ts - now_ts)
+    return result
+
 init_db()
 
 
