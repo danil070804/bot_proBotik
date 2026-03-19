@@ -12,6 +12,49 @@ except ImportError:  # pragma: no cover
 IS_POSTGRES = bool(DATABASE_URL and psycopg2)
 
 
+def _normalize_account_health_status(status):
+    value = str(status or '').strip().lower()
+    return {
+        'active': 'working',
+        'unknown': 'invalid',
+        'working': 'working',
+        'limited': 'limited',
+        'flooded': 'flooded',
+        'dead': 'dead',
+        'invalid': 'invalid',
+    }.get(value, 'invalid')
+
+
+def _sqlite_table_columns(cursor, table_name):
+    cursor.execute(f'PRAGMA table_info({table_name})')
+    return {str(row[1]) for row in cursor.fetchall()}
+
+
+def _ensure_sqlite_column(cursor, table_name, column_name, definition):
+    columns = _sqlite_table_columns(cursor, table_name)
+    if column_name not in columns:
+        cursor.execute(f'ALTER TABLE {table_name} ADD COLUMN {column_name} {definition}')
+
+
+def _ensure_account_health_schema(cursor):
+    if IS_POSTGRES:
+        cursor.execute('ALTER TABLE account_health ADD COLUMN IF NOT EXISTS reason_code TEXT')
+        cursor.execute('ALTER TABLE account_health ADD COLUMN IF NOT EXISTS reason_text TEXT')
+        cursor.execute('ALTER TABLE account_health ADD COLUMN IF NOT EXISTS me_username TEXT')
+        cursor.execute('ALTER TABLE account_health ADD COLUMN IF NOT EXISTS me_id BIGINT')
+        cursor.execute('ALTER TABLE account_health ADD COLUMN IF NOT EXISTS is_deleted BOOLEAN DEFAULT FALSE')
+        cursor.execute('ALTER TABLE account_health ADD COLUMN IF NOT EXISTS dialogs_check_ok BOOLEAN DEFAULT FALSE')
+        cursor.execute('ALTER TABLE account_health ADD COLUMN IF NOT EXISTS entity_check_ok BOOLEAN DEFAULT FALSE')
+    else:
+        _ensure_sqlite_column(cursor, 'account_health', 'reason_code', 'TEXT')
+        _ensure_sqlite_column(cursor, 'account_health', 'reason_text', 'TEXT')
+        _ensure_sqlite_column(cursor, 'account_health', 'me_username', 'TEXT')
+        _ensure_sqlite_column(cursor, 'account_health', 'me_id', 'INTEGER')
+        _ensure_sqlite_column(cursor, 'account_health', 'is_deleted', 'INTEGER DEFAULT 0')
+        _ensure_sqlite_column(cursor, 'account_health', 'dialogs_check_ok', 'INTEGER DEFAULT 0')
+        _ensure_sqlite_column(cursor, 'account_health', 'entity_check_ok', 'INTEGER DEFAULT 0')
+
+
 @contextmanager
 def get_connection():
     conn = None
@@ -81,7 +124,9 @@ def init_db():
             )
             cursor.execute(
                 'CREATE TABLE IF NOT EXISTS account_health('
-                'session TEXT PRIMARY KEY, status TEXT NOT NULL, details TEXT, '
+                'session TEXT PRIMARY KEY, status TEXT NOT NULL, details TEXT, reason_code TEXT, reason_text TEXT, '
+                'me_username TEXT, me_id BIGINT, is_deleted BOOLEAN DEFAULT FALSE, '
+                'dialogs_check_ok BOOLEAN DEFAULT FALSE, entity_check_ok BOOLEAN DEFAULT FALSE, '
                 'last_check TIMESTAMP DEFAULT NOW(), updated_at TIMESTAMP DEFAULT NOW())'
             )
             cursor.execute(
@@ -225,7 +270,9 @@ def init_db():
             )
             cursor.execute(
                 'CREATE TABLE IF NOT EXISTS account_health('
-                'session TEXT PRIMARY KEY, status TEXT NOT NULL, details TEXT, '
+                'session TEXT PRIMARY KEY, status TEXT NOT NULL, details TEXT, reason_code TEXT, reason_text TEXT, '
+                'me_username TEXT, me_id INTEGER, is_deleted INTEGER DEFAULT 0, '
+                'dialogs_check_ok INTEGER DEFAULT 0, entity_check_ok INTEGER DEFAULT 0, '
                 'last_check TEXT DEFAULT CURRENT_TIMESTAMP, updated_at TEXT DEFAULT CURRENT_TIMESTAMP)'
             )
             cursor.execute(
@@ -326,6 +373,7 @@ def init_db():
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_campaign_recipients_join ON campaign_recipients(campaign_id, join_status)')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_join_requests_status ON join_requests(status)')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_join_requests_lookup ON join_requests(community_id, telegram_user_id)')
+        _ensure_account_health_schema(cursor)
         conn.commit()
         cursor.close()
 
@@ -801,10 +849,28 @@ def get_session_files():
         return result
 
 
-def set_account_health(session, status, details=''):
+def set_account_health(
+    session,
+    status,
+    details='',
+    reason_code='',
+    reason_text='',
+    me_username='',
+    me_id=None,
+    is_deleted=False,
+    dialogs_check_ok=False,
+    entity_check_ok=False,
+):
     session = str(session or '').strip()
-    status = str(status or 'unknown').strip().lower()
+    status = _normalize_account_health_status(status)
     details = str(details or '').strip()
+    reason_code = str(reason_code or '').strip()
+    reason_text = str(reason_text or details or '').strip()
+    me_username = str(me_username or '').strip()
+    me_id = int(me_id) if me_id not in [None, ''] else None
+    is_deleted = bool(is_deleted)
+    dialogs_check_ok = bool(dialogs_check_ok)
+    entity_check_ok = bool(entity_check_ok)
     if not session:
         return ''
     with get_connection() as conn:
@@ -817,41 +883,130 @@ def set_account_health(session, status, details=''):
         prev_status = row[0] if row else ''
         if IS_POSTGRES:
             cursor.execute(
-                'INSERT INTO account_health(session, status, details) VALUES (%s, %s, %s) '
+                'INSERT INTO account_health('
+                'session, status, details, reason_code, reason_text, me_username, me_id, '
+                'is_deleted, dialogs_check_ok, entity_check_ok'
+                ') VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) '
                 'ON CONFLICT (session) DO UPDATE SET '
-                'status = EXCLUDED.status, details = EXCLUDED.details, last_check = NOW(), '
+                'status = EXCLUDED.status, details = EXCLUDED.details, reason_code = EXCLUDED.reason_code, '
+                'reason_text = EXCLUDED.reason_text, me_username = EXCLUDED.me_username, '
+                'me_id = EXCLUDED.me_id, is_deleted = EXCLUDED.is_deleted, '
+                'dialogs_check_ok = EXCLUDED.dialogs_check_ok, entity_check_ok = EXCLUDED.entity_check_ok, '
+                'last_check = NOW(), '
                 'updated_at = CASE WHEN account_health.status <> EXCLUDED.status THEN NOW() ELSE account_health.updated_at END',
-                (session, status, details),
+                (
+                    session,
+                    status,
+                    details,
+                    reason_code,
+                    reason_text,
+                    me_username,
+                    me_id,
+                    is_deleted,
+                    dialogs_check_ok,
+                    entity_check_ok,
+                ),
             )
         else:
             cursor.execute(
-                'INSERT INTO account_health(session, status, details, last_check, updated_at) '
-                'VALUES (?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) '
+                'INSERT INTO account_health('
+                'session, status, details, reason_code, reason_text, me_username, me_id, '
+                'is_deleted, dialogs_check_ok, entity_check_ok, last_check, updated_at'
+                ') VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) '
                 'ON CONFLICT(session) DO UPDATE SET '
-                'status = excluded.status, details = excluded.details, last_check = CURRENT_TIMESTAMP, '
+                'status = excluded.status, details = excluded.details, reason_code = excluded.reason_code, '
+                'reason_text = excluded.reason_text, me_username = excluded.me_username, me_id = excluded.me_id, '
+                'is_deleted = excluded.is_deleted, dialogs_check_ok = excluded.dialogs_check_ok, '
+                'entity_check_ok = excluded.entity_check_ok, last_check = CURRENT_TIMESTAMP, '
                 'updated_at = CASE WHEN account_health.status <> excluded.status THEN CURRENT_TIMESTAMP ELSE account_health.updated_at END',
-                (session, status, details),
+                (
+                    session,
+                    status,
+                    details,
+                    reason_code,
+                    reason_text,
+                    me_username,
+                    me_id,
+                    1 if is_deleted else 0,
+                    1 if dialogs_check_ok else 0,
+                    1 if entity_check_ok else 0,
+                ),
             )
         conn.commit()
         cursor.close()
-        return prev_status
+        return _normalize_account_health_status(prev_status)
 
 
 def get_account_health(session):
+    record = get_account_health_record(session)
+    return (
+        record.get('status', 'invalid'),
+        record.get('reason_text') or record.get('details') or '',
+        str(record.get('last_check') or ''),
+    )
+
+
+def get_account_health_record(session):
     session = str(session or '').strip()
     if not session:
-        return ('unknown', '', '')
+        return {
+            'session': '',
+            'status': 'invalid',
+            'details': '',
+            'reason_code': 'not_checked',
+            'reason_text': 'Проверка аккаунта ещё не выполнялась',
+            'me_username': '',
+            'me_id': None,
+            'is_deleted': False,
+            'dialogs_check_ok': False,
+            'entity_check_ok': False,
+            'last_check': '',
+        }
     with get_connection() as conn:
         cursor = conn.cursor()
         if IS_POSTGRES:
-            cursor.execute('SELECT status, details, last_check FROM account_health WHERE session = %s', (session,))
+            cursor.execute(
+                'SELECT session, status, details, reason_code, reason_text, me_username, me_id, '
+                'is_deleted, dialogs_check_ok, entity_check_ok, last_check '
+                'FROM account_health WHERE session = %s',
+                (session,),
+            )
         else:
-            cursor.execute('SELECT status, details, last_check FROM account_health WHERE session = ?', (session,))
+            cursor.execute(
+                'SELECT session, status, details, reason_code, reason_text, me_username, me_id, '
+                'is_deleted, dialogs_check_ok, entity_check_ok, last_check '
+                'FROM account_health WHERE session = ?',
+                (session,),
+            )
         row = cursor.fetchone()
         cursor.close()
         if not row:
-            return ('unknown', '', '')
-        return (row[0] or 'unknown', row[1] or '', str(row[2] or ''))
+            return {
+                'session': session,
+                'status': 'invalid',
+                'details': '',
+                'reason_code': 'not_checked',
+                'reason_text': 'Проверка аккаунта ещё не выполнялась',
+                'me_username': '',
+                'me_id': None,
+                'is_deleted': False,
+                'dialogs_check_ok': False,
+                'entity_check_ok': False,
+                'last_check': '',
+            }
+        return {
+            'session': row[0] or session,
+            'status': _normalize_account_health_status(row[1]),
+            'details': row[2] or '',
+            'reason_code': row[3] or '',
+            'reason_text': row[4] or row[2] or '',
+            'me_username': row[5] or '',
+            'me_id': row[6],
+            'is_deleted': bool(row[7]),
+            'dialogs_check_ok': bool(row[8]),
+            'entity_check_ok': bool(row[9]),
+            'last_check': str(row[10] or ''),
+        }
 
 init_db()
 

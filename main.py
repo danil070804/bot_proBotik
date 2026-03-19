@@ -28,13 +28,13 @@ from db import (
 	get_main_connection, init_db, get_app_setting, set_app_setting,
 	add_source_filter, remove_source_filter, get_source_filters,
 	add_user_filter, remove_user_filter, get_user_filters,
-	get_account_health, set_account_health, set_account_warmup, get_account_warmup_remaining,
+	get_account_health_record, set_account_health, set_account_warmup, get_account_warmup_remaining,
 	save_session_file, delete_session_file, get_session_files
 )
 from telethon.errors import UserAlreadyParticipantError
 from telethon.tl.functions.channels import JoinChannelRequest
 from telethon.tl.functions.messages import ImportChatInviteRequest
-from functions import get_proxy, get_sessions, build_telegram_client
+from functions import get_proxy, get_sessions, get_usable_sessions, build_telegram_client
 from repositories.audience import AudienceRepository
 from repositories.campaigns import CampaignRepository
 from repositories.communities import CommunityRepository
@@ -43,6 +43,7 @@ from repositories.parse_tasks import ParseTaskRepository
 from repositories.segments import SegmentRepository
 from repositories.users import UserRepository
 from services.campaign_service import CampaignService
+from services.account_health_service import AccountHealthService
 from services.join_request_service import JoinRequestService
 from services.target_normalizer import INVITE_TYPE, parse_target
 from telegram.webhook_handlers import (
@@ -75,6 +76,7 @@ JOIN_REQUEST_SERVICE = JoinRequestService(
 	users=USER_REPO,
 	join_requests=JOIN_REQUEST_REPO,
 )
+ACCOUNT_HEALTH_SERVICE = AccountHealthService()
 
 
 def _restore_session_files():
@@ -108,6 +110,7 @@ DEFAULT_APP_SETTINGS = {
 	'campaign_rate_limit_per_hour': '300',
 	'campaign_max_attempts': '1',
 	'campaign_stop_on_error_rate': '0.30',
+	'accounts_allow_limited': '0',
 	'active_preset': 'standard',
 }
 PRESET_CONFIGS = {
@@ -125,6 +128,7 @@ PRESET_CONFIGS = {
 		'campaign_rate_limit_per_hour': '120',
 		'campaign_max_attempts': '1',
 		'campaign_stop_on_error_rate': '0.15',
+		'accounts_allow_limited': '0',
 		'active_preset': 'super_safe',
 	},
 	'soft': {
@@ -141,6 +145,7 @@ PRESET_CONFIGS = {
 		'campaign_rate_limit_per_hour': '200',
 		'campaign_max_attempts': '1',
 		'campaign_stop_on_error_rate': '0.20',
+		'accounts_allow_limited': '0',
 		'active_preset': 'soft',
 	},
 	'standard': {
@@ -157,6 +162,7 @@ PRESET_CONFIGS = {
 		'campaign_rate_limit_per_hour': '300',
 		'campaign_max_attempts': '1',
 		'campaign_stop_on_error_rate': '0.30',
+		'accounts_allow_limited': '0',
 		'active_preset': 'standard',
 	},
 	'aggressive': {
@@ -173,6 +179,7 @@ PRESET_CONFIGS = {
 		'campaign_rate_limit_per_hour': '600',
 		'campaign_max_attempts': '2',
 		'campaign_stop_on_error_rate': '0.40',
+		'accounts_allow_limited': '1',
 		'active_preset': 'aggressive',
 	},
 }
@@ -332,6 +339,8 @@ def _build_page_nav(prev_callback, next_callback, back_callback):
 
 def _format_username(username):
 	value = str(username or '').strip().lstrip('@')
+	if value in ['', '—', '-']:
+		return '—'
 	return f'@{value}' if value else '—'
 
 
@@ -357,16 +366,20 @@ def _session_username(details):
 def _account_rows():
 	rows = []
 	for index, session in enumerate(list_sessions()):
-		status, details, last_check = get_account_health(session)
+		record = get_account_health_record(session)
 		rows.append(
 			{
 				'index': index,
 				'session': session,
 				'phone': _session_phone(session),
-				'username': _session_username(details),
-				'status': status,
-				'details': details,
-				'last_check': last_check,
+				'username': _format_username(record.get('me_username') or _session_username(record.get('details'))),
+				'status': record.get('status'),
+				'details': record.get('reason_text') or record.get('details'),
+				'reason_code': record.get('reason_code'),
+				'last_check': record.get('last_check'),
+				'is_deleted': record.get('is_deleted'),
+				'dialogs_check_ok': record.get('dialogs_check_ok'),
+				'entity_check_ok': record.get('entity_check_ok'),
 				'warmup': get_account_warmup_remaining(session),
 			}
 		)
@@ -399,8 +412,8 @@ def _community_rows():
 
 def _accounts_text():
 	rows = _account_rows()
-	active = len([row for row in rows if row.get('status') == 'active'])
-	problems = len([row for row in rows if row.get('status') not in {'active', 'unknown'}])
+	active = len([row for row in rows if row.get('status') == 'working'])
+	problems = len([row for row in rows if row.get('status') in {'limited', 'flooded', 'dead', 'invalid'}])
 	return build_section_screen(
 		'🔑 Аккаунты',
 		stats=[('Всего', len(rows)), ('Активны', active, ' 🟢'), ('Проблемы', problems, ' 🔴')],
@@ -457,14 +470,18 @@ def _account_card_text(account_index):
 		'👤 Аккаунт',
 		[
 			('Телефон', item.get('phone'), 'code'),
-			('Username', _format_username(item.get('username')), 'code'),
+			('Username', item.get('username'), 'code'),
 			('Статус', f'{_account_status_emoji(item.get("status"))} {_account_status_title(item.get("status"))}'),
+			('Причина', item.get('reason_code') or 'ok', 'code'),
 			('Сессия', item.get('session'), 'code'),
 			('Прокси', proxy_state),
 			('Последняя проверка', last_check, 'code'),
+			('Диалоги', 'ok' if item.get('dialogs_check_ok') else 'fail', 'code'),
+			('Entity', 'ok' if item.get('entity_check_ok') else 'fail', 'code'),
 			('Группа', '—'),
 			('Прогрев', warmup, 'code'),
-		]
+		],
+		footer=item.get('details') or '—'
 	)
 
 
@@ -577,20 +594,26 @@ def _build_communities_list_keyboard(page=0):
 
 def _account_status_emoji(status):
 	return {
-		'active': '🟢',
+		'working': '🟢',
 		'limited': '🟡',
+		'flooded': '🟠',
 		'dead': '🔴',
+		'invalid': '⚫',
+		'active': '🟢',
 		'unknown': '⚫',
 	}.get(status, '⚫')
 
 
 def _account_status_title(status):
 	return {
-		'active': 'Активен',
+		'working': 'Рабочий',
 		'limited': 'Ограничен',
-		'dead': 'Ошибка',
-		'unknown': 'Не активен',
-	}.get(status, 'Не активен')
+		'flooded': 'Flood',
+		'dead': 'Мёртвый',
+		'invalid': 'Не авторизован',
+		'active': 'Рабочий',
+		'unknown': 'Не авторизован',
+	}.get(status, 'Не авторизован')
 
 
 def _fmt_seconds_ru(total_seconds):
@@ -615,6 +638,22 @@ def _health_details_ru(details):
 	text = str(details or '').strip()
 	if text == '':
 		return '-'
+	code_map = {
+		'ok': 'Аккаунт пригоден для рабочих операций',
+		'deleted_account': 'Аккаунт недоступен для рабочих операций',
+		'unauthorized': 'Сессия не авторизована',
+		'session_invalid': 'Сессия недействительна или требует повторного входа',
+		'flood_wait': 'Аккаунт временно ограничен flood-лимитами',
+		'entity_resolve_failed': 'Не удалось разрешить Telegram-сущность',
+		'dialogs_failed': 'Не удалось получить список диалогов',
+		'rpc_error': 'Аккаунт ограничен для части операций',
+		'unknown_error': 'Неизвестная ошибка проверки аккаунта',
+		'functional_checks_failed': 'Функциональная проверка не пройдена',
+		'api_credentials_missing': 'Не настроены API ID / API HASH',
+		'not_checked': 'Проверка аккаунта ещё не выполнялась',
+	}
+	if text in code_map:
+		return code_map[text]
 	if 'Session not authorized' in text:
 		return 'Сессия не авторизована'
 	if 'TG_API_ID/TG_API_HASH not configured' in text:
@@ -686,19 +725,19 @@ async def _probe_spam_block(client):
 		bad = ['limited', 'огранич', 'cannot', "can't", 'спам', 'spam']
 		ok = ['no limits', 'good news', 'нет ограничений']
 		if any(x in lower for x in ok):
-			return 'active', 'Ограничений через @SpamBot не обнаружено'
+			return 'working', 'Ограничений через @SpamBot не обнаружено'
 		if any(x in lower for x in bad):
 			return 'limited', 'Ограничения обнаружены через @SpamBot'
-		return 'active', 'Базовая проверка пройдена'
+		return 'working', 'Базовая проверка пройдена'
 	except Exception:
-		return 'active', 'Базовая проверка пройдена'
+		return 'working', 'Базовая проверка пройдена'
 
 
 def _detect_health_status_by_error(exc):
 	name = exc.__class__.__name__
 	text = _health_details_ru(f'{name}: {exc}')
 	if 'JSON не содержит StringSession' in text:
-		return 'dead', text
+		return 'invalid', text
 	dead_errors = {
 		'AuthKeyUnregisteredError',
 		'SessionRevokedError',
@@ -713,44 +752,34 @@ def _detect_health_status_by_error(exc):
 	if name in dead_errors:
 		return 'dead', text
 	if name in limited_errors:
-		return 'limited', text
+		return 'flooded', text
 	return 'limited', text
 
 
 def _check_account_health(session, deep_check=False):
-	async def _run():
-		client = None
-		try:
-			client = build_telegram_client(session, config.API_ID, config.API_HASH, proxy=get_proxy())
-			await client.connect()
-			if not await client.is_user_authorized():
-				return 'dead', 'Сессия не авторизована'
-			me = await client.get_me()
-			if deep_check:
-				await _join_test_chat_if_needed(client)
-				probe_status, probe_reason = await _probe_spam_block(client)
-				if probe_status == 'limited':
-					return 'limited', probe_reason
-			user_label = f'@{me.username}' if getattr(me, 'username', None) else f'id={getattr(me, "id", "n/a")}'
-			return 'active', f'Аккаунт рабочий: {user_label}'
-		except Exception as e:
-			return _detect_health_status_by_error(e)
-		finally:
-			if client:
-				try:
-					await client.disconnect()
-				except Exception:
-					pass
-
-	if not config.API_ID or not config.API_HASH:
-		return 'limited', 'Не настроены API ID / API HASH'
-	return asyncio.run(_run())
+	return ACCOUNT_HEALTH_SERVICE.check_account_health(session, deep_check=deep_check)
 
 
-def _notify_health_change_if_needed(session, prev_status, new_status, details):
+def _store_account_health_result(session, result):
+	return set_account_health(
+		session,
+		result.status,
+		result.reason_text,
+		reason_code=result.reason_code,
+		reason_text=result.reason_text,
+		me_username=result.me_username,
+		me_id=result.me_id,
+		is_deleted=result.is_deleted,
+		dialogs_check_ok=result.dialogs_ok,
+		entity_check_ok=result.entity_ok,
+	)
+
+
+def _notify_health_change_if_needed(session, prev_status, result):
+	new_status = result.status
 	if prev_status == new_status:
 		return
-	if new_status not in ('dead', 'limited', 'active'):
+	if new_status not in ('working', 'limited', 'flooded', 'dead', 'invalid'):
 		return
 	if len(ADMINS) == 0:
 		return
@@ -758,7 +787,8 @@ def _notify_health_change_if_needed(session, prev_status, new_status, details):
 		f'🔔 <b>Статус аккаунта изменился</b>\n'
 		f'• Аккаунт: <code>{session}</code>\n'
 		f'• Статус: {_account_status_emoji(new_status)} <b>{_account_status_title(new_status)}</b>\n'
-		f'• Детали: <code>{_health_details_ru(details)[:500]}</code>'
+		f'• Причина: <code>{result.reason_code or "-"}</code>\n'
+		f'• Детали: <code>{_health_details_ru(result.reason_text)[:500]}</code>'
 	)
 	for admin_id in sorted(ADMINS):
 		try:
@@ -768,20 +798,21 @@ def _notify_health_change_if_needed(session, prev_status, new_status, details):
 
 
 def _process_uploaded_session(chat_id, filename):
-	status, details = _check_account_health(filename, deep_check=False)
-	prev = set_account_health(filename, status, details)
-	_notify_health_change_if_needed(filename, prev, status, details)
-	if status == 'dead':
+	result = _check_account_health(filename, deep_check=False)
+	prev = _store_account_health_result(filename, result)
+	_notify_health_change_if_needed(filename, prev, result)
+	if result.status in {'dead', 'invalid'}:
 		bot.send_message(
 			chat_id,
 			f'⚠️ <b>Аккаунт не прошёл проверку</b>\n'
 			f'Файл сохранён: <code>{filename}</code>\n'
-			f'Причина: <code>{_health_details_ru(details)[:300]}</code>\n\n'
+			f'Причина: <code>{result.reason_code}</code>\n'
+			f'Детали: <code>{_health_details_ru(result.reason_text)[:300]}</code>\n\n'
 			'Автоудаление отключено: файл оставлен как есть, удалить его можно вручную из меню аккаунтов.',
 			parse_mode='HTML'
 		)
 		return
-	if status == 'active':
+	if result.status == 'working':
 		warmup_days = max(0, _setting_int('account_warmup_days'))
 		set_account_warmup(filename, warmup_days * 86400)
 		warmup_text = f'\nПрогрев до инвайта: <b>{warmup_days} дн.</b>' if warmup_days > 0 else ''
@@ -790,8 +821,9 @@ def _process_uploaded_session(chat_id, filename):
 	bot.send_message(
 		chat_id,
 		f'✅ Аккаунт добавлен: <code>{filename}</code>\n'
-		f'Статус: {_account_status_emoji(status)} <b>{_account_status_title(status)}</b>\n'
-		f'Детали: <code>{_health_details_ru(details)[:300]}</code>\n'
+		f'Статус: {_account_status_emoji(result.status)} <b>{_account_status_title(result.status)}</b>\n'
+		f'Причина: <code>{result.reason_code}</code>\n'
+		f'Детали: <code>{_health_details_ru(result.reason_text)[:300]}</code>\n'
 		f'Всего аккаунтов: <b>{len(list_sessions())}</b>{warmup_text}',
 		parse_mode='HTML'
 	)
@@ -1016,9 +1048,9 @@ def _account_health_monitor():
 	while True:
 		try:
 			for session in list_sessions():
-				status, details = _check_account_health(session)
-				prev = set_account_health(session, status, details)
-				_notify_health_change_if_needed(session, prev, status, details)
+				result = _check_account_health(session)
+				prev = _store_account_health_result(session, result)
+				_notify_health_change_if_needed(session, prev, result)
 		except Exception:
 			pass
 		time.sleep(max(60, int(config.account_monitor_interval)))
@@ -1189,9 +1221,20 @@ def _has_active_flow(user_id):
 
 
 def _ensure_sessions_or_warn(chat_id, message_id=None):
-	count = len(list_sessions())
-	if count > 0:
+	all_count = len(list_sessions())
+	usable_count = len(get_usable_sessions())
+	if usable_count > 0:
 		return True
+	if all_count > 0:
+		text = (
+			'⛔ <b>Нет рабочих аккаунтов</b>\n'
+			'Запусти проверку в разделе «Аккаунты», чтобы получить хотя бы 1 статус <b>Рабочий</b>.'
+		)
+		if message_id:
+			_render_inline(chat_id, message_id, text, parse_mode='HTML', reply_markup=build_new_menu())
+		else:
+			bot.send_message(chat_id, text, parse_mode='HTML', reply_markup=build_new_menu())
+		return False
 	text = (
 		'⛔ <b>Невозможно запустить сценарий</b>\n'
 		'Сначала добавьте хотя бы <b>1 .session</b> аккаунт в разделе «Аккаунты».'
@@ -1310,6 +1353,7 @@ def _setting_title(key):
 		'parser_posts_limit': 'Лимит постов парсинга',
 		'parser_comments_limit': 'Лимит комментариев парсинга',
 		'parser_use_all_sessions': 'Использовать все аккаунты в парсинге',
+		'accounts_allow_limited': 'Разрешить ограниченные аккаунты',
 		'campaign_rate_limit_per_minute': 'Rate limit в минуту',
 		'campaign_rate_limit_per_hour': 'Rate limit в час',
 		'campaign_max_attempts': 'Максимум попыток доставки',
@@ -1350,7 +1394,7 @@ def _settings_category_text(category):
 		'limits': ('⏱ Лимиты', f'Парсинг: {_setting_int("parser_posts_limit")} / {_setting_int("parser_comments_limit")}. Rate: {_setting_int("campaign_rate_limit_per_minute")}/мин.'),
 		'notifications': ('🔔 Уведомления', 'Системные уведомления и служебные сообщения будут вынесены сюда.'),
 		'interface': ('🎨 Интерфейс', 'Планируется compact/pro режим и настройка визуального стиля.'),
-		'security': ('🛡 Безопасность', f'Прогрев аккаунтов: {_setting_int("account_warmup_days")} дн. Проверки и права доступа на этом экране.'),
+		'security': ('🛡 Безопасность', f'Прогрев аккаунтов: {_setting_int("account_warmup_days")} дн. Ограниченные аккаунты: {"вкл" if _setting_bool("accounts_allow_limited") else "выкл"}.'),
 	}
 	title, description = data.get(category, ('⚙️ Настройки', 'Раздел в разработке.'))
 	return build_section_screen(title, description=description)
@@ -1368,6 +1412,12 @@ def _build_settings_detail_menu(category):
 		return build_inline_keyboard([
 			[('✏️ Посты', 'settings_edit|parser_posts_limit'), ('✏️ Комменты', 'settings_edit|parser_comments_limit')],
 			[('✏️ Лимит/мин', 'settings_edit|campaign_rate_limit_per_minute'), ('✏️ Лимит/час', 'settings_edit|campaign_rate_limit_per_hour')],
+			[('⬅️ Назад', 'settings_menu')],
+		])
+	if category == 'security':
+		return build_inline_keyboard([
+			[('🕒 Прогрев', 'settings_edit|account_warmup_days')],
+			[('🟡 Ограниченные', 'settings_toggle|accounts_allow_limited')],
 			[('⬅️ Назад', 'settings_menu')],
 		])
 	return build_inline_keyboard([[('⬅️ Назад', 'settings_menu')]])
@@ -3247,9 +3297,9 @@ def podcategors(call):
 		except Exception:
 			bot.answer_callback_query(call.id, 'Аккаунт не найден')
 			return
-		status, details = _check_account_health(item.get('session'), deep_check=False)
-		prev = set_account_health(item.get('session'), status, details)
-		_notify_health_change_if_needed(item.get('session'), prev, status, details)
+		result = _check_account_health(item.get('session'), deep_check=False)
+		prev = _store_account_health_result(item.get('session'), result)
+		_notify_health_change_if_needed(item.get('session'), prev, result)
 		_render_inline(
 			call.message.chat.id,
 			call.message.message_id,
@@ -3306,13 +3356,41 @@ def podcategors(call):
 			bot.send_message(call.message.chat.id, 'Аккаунты не добавлены.')
 			return
 		bot.send_message(call.message.chat.id, '🔍 Запускаю проверку аккаунтов...')
-		lines = []
+		counts = {
+			'working': 0,
+			'limited': 0,
+			'flooded': 0,
+			'dead': 0,
+			'invalid': 0,
+		}
+		problem_lines = []
 		for s in sessions:
-			status, details = _check_account_health(s, deep_check=False)
-			prev = set_account_health(s, status, details)
-			_notify_health_change_if_needed(s, prev, status, details)
-			lines.append(f'{_account_status_emoji(status)} <code>{s}</code> — <b>{_account_status_title(status)}</b>')
-		_send_html_chunks(call.message.chat.id, '✅ Проверка завершена\n', lines)
+			result = _check_account_health(s, deep_check=False)
+			prev = _store_account_health_result(s, result)
+			_notify_health_change_if_needed(s, prev, result)
+			counts[result.status] = counts.get(result.status, 0) + 1
+			if result.status != 'working':
+				problem_lines.append(
+					f'{_account_status_emoji(result.status)} <code>{s}</code> — <code>{result.reason_code}</code>'
+				)
+		text = (
+			'🩺 <b>Проверка аккаунтов завершена</b>\n\n'
+			f'Всего: <b>{len(sessions)}</b>\n'
+			f'🟢 Рабочие: <b>{counts.get("working", 0)}</b>\n'
+			f'🟡 Ограничены: <b>{counts.get("limited", 0)}</b>\n'
+			f'🟠 Flood: <b>{counts.get("flooded", 0)}</b>\n'
+			f'🔴 Мёртвые: <b>{counts.get("dead", 0)}</b>\n'
+			f'⚫ Не авторизованы: <b>{counts.get("invalid", 0)}</b>'
+		)
+		if problem_lines:
+			text += '\n\n' + '\n'.join(problem_lines[:10])
+		_render_inline(
+			call.message.chat.id,
+			call.message.message_id,
+			text,
+			parse_mode='HTML',
+			reply_markup=_build_accounts_menu()
+		)
 		return
 
 	if call.data.startswith('del_session|'):

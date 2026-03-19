@@ -6,7 +6,7 @@ from loguru import logger
 
 from config import API_ID, API_HASH
 from db import set_account_health
-from functions import get_proxy, get_sessions, build_telegram_client
+from functions import get_proxy, get_usable_sessions, build_telegram_client
 from services.join_service import JoinService
 
 
@@ -82,18 +82,24 @@ def _health_update_from_result(result, parsed_target):
     status = result.get('status')
     target_ref = parsed_target.display_value
     if status == 'joined':
-        return 'active', f'Вступил в цель {target_ref}'
+        return 'working', 'ok', f'Вступил в цель {target_ref}'
     if status == 'already_in':
-        return 'active', f'Уже состоит в цели {target_ref}'
+        return 'working', 'ok', f'Уже состоит в цели {target_ref}'
     if status == 'join_request_sent':
-        return 'active', f'Отправил join request в цель {target_ref}'
+        return 'working', 'ok', f'Отправил join request в цель {target_ref}'
     if status in {'flood_wait', 'account_limited'}:
-        return 'limited', f'{result.get("error_code")}: {result.get("error_text")}'
-    if status in {'account_banned', 'session_invalid'}:
-        return 'dead', f'{result.get("error_code")}: {result.get("error_text")}'
+        return (
+            'flooded' if status == 'flood_wait' else 'limited',
+            result.get('error_code') or status,
+            result.get('error_text') or '',
+        )
+    if status == 'account_banned':
+        return 'dead', result.get('error_code') or status, result.get('error_text') or ''
+    if status == 'session_invalid':
+        return 'invalid', result.get('error_code') or status, result.get('error_text') or ''
     if status == 'unknown_error':
-        return 'limited', f'{result.get("exception_name") or "UnknownError"}: {result.get("error_text")}'
-    return '', ''
+        return 'limited', result.get('error_code') or 'unknown_error', result.get('error_text') or ''
+    return '', '', ''
 
 
 async def run_target_joiner(target, progress_file):
@@ -104,9 +110,9 @@ async def run_target_joiner(target, progress_file):
         raise RuntimeError('Set --target')
 
     parsed_target = JOIN_SERVICE.parse_target(target)
-    sessions = get_sessions()
+    sessions = get_usable_sessions()
     if not sessions:
-        raise RuntimeError('No session files found')
+        raise RuntimeError('No working session files found')
 
     progress = _base_progress(target, parsed_target, sessions)
     logger.info(
@@ -152,9 +158,9 @@ async def run_target_joiner(target, progress_file):
 
         _apply_result(progress, result)
         progress['message'] = f'{result.get("status")}:{session}'
-        account_status, account_details = _health_update_from_result(result, parsed_target)
+        account_status, reason_code, account_details = _health_update_from_result(result, parsed_target)
         if account_status:
-            set_account_health(session, account_status, account_details)
+            set_account_health(session, account_status, account_details, reason_code=reason_code, reason_text=account_details)
         logger.info(
             'target_joiner.account session={} target_type={} normalized_target={} join_method={} status={} error_code={} error_text={}',
             session,

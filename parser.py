@@ -8,7 +8,7 @@ from telethon.tl.functions.channels import JoinChannelRequest
 
 from config import API_ID, API_HASH
 from db import save_parsed_user, save_parsed_comment, is_source_allowed
-from functions import get_sessions, get_proxy, build_telegram_client
+from functions import get_usable_sessions, get_proxy, build_telegram_client
 from repositories.audience import AudienceRepository
 from repositories.parse_tasks import ParseTaskRepository
 
@@ -242,9 +242,9 @@ async def run_parser(
     targets = _read_targets(target, targets_file)
     if not targets:
         raise RuntimeError('Set --target or --targets-file with source chats/channels')
-    sessions = get_sessions()
+    sessions = get_usable_sessions()
     if not sessions:
-        raise RuntimeError('No session files found')
+        raise RuntimeError('No working session files found')
     if not use_all_sessions and (session_index < 0 or session_index >= len(sessions)):
         raise RuntimeError(f'session-index out of range: 0..{len(sessions) - 1}')
     proxy = get_proxy()

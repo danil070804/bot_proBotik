@@ -5,7 +5,7 @@ from time import sleep
 import asyncio
 
 from config import API_ID, API_HASH, slp, join_sleep, from_join_sleep, to_join_sleep
-from functions import get_sessions, get_proxy, generate_chats_list, build_telegram_client
+from functions import get_usable_sessions, get_proxy, generate_chats_list, build_telegram_client
 from db import insert_chat_db, get_all_chats, is_full
 from services.join_service import JoinService
 
@@ -62,8 +62,10 @@ async def add_acc(session, chats, proxy):
 async def main():
     if not API_ID or not API_HASH:
         raise RuntimeError('Set TG_API_ID and TG_API_HASH env vars')
-    sessions = get_sessions()
-    chats_list = generate_chats_list()
+    sessions = get_usable_sessions()
+    if not sessions:
+        raise RuntimeError('No working session files found')
+    chats_list = generate_chats_list(sessions=sessions)
     proxy = get_proxy()
     logger.info('Script started')
 

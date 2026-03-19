@@ -28,9 +28,9 @@ def get_chats():
     return chats
 
 
-def generate_chats_list():
+def generate_chats_list(sessions=None):
     chats = get_chats()
-    sessions_count = len(get_sessions())
+    sessions_count = len(sessions or get_sessions())
     if sessions_count == 0 or len(chats) == 0:
         return []
     my_len = len(chats) // sessions_count
@@ -134,6 +134,24 @@ def get_sessions():
         if _is_session_json_path(path):
             sessions.append(os.path.basename(path))
     return list(dict.fromkeys(sessions))
+
+
+def get_usable_sessions(allow_limited=None):
+    from db import get_account_health_record, get_app_setting
+
+    if allow_limited is None:
+        allow_limited = str(get_app_setting('accounts_allow_limited', '0')).strip().lower() in ['1', 'true', 'yes', 'on']
+
+    allowed_statuses = {'working'}
+    if allow_limited:
+        allowed_statuses.add('limited')
+
+    result = []
+    for session in get_sessions():
+        status = str((get_account_health_record(session) or {}).get('status') or '').strip().lower()
+        if status in allowed_statuses:
+            result.append(session)
+    return result
 
 
 def _dc_endpoint(dc_id):

@@ -26,7 +26,7 @@ from db import (
     get_account_warmup_remaining,
     set_account_health,
 )
-from functions import get_proxy, get_sessions, build_telegram_client
+from functions import get_proxy, get_usable_sessions, build_telegram_client
 
 
 logger.add('logging.log', rotation='1 MB', encoding='utf-8')
@@ -107,7 +107,7 @@ async def _get_or_create_client(session, clients, proxy, invite_target):
         return clients[session]
     client = build_telegram_client(session, API_ID, API_HASH, proxy=proxy)
     await client.start()
-    set_account_health(session, 'active', 'Авторизация успешна')
+    set_account_health(session, 'working', 'Авторизация успешна', reason_code='ok', reason_text='Аккаунт пригоден для рабочих операций')
     await ensure_join_target(client, invite_target)
     clients[session] = client
     return client
@@ -125,9 +125,9 @@ async def run_inviter(
     if all_parsed:
         sources = ['__all__']
 
-    sessions = get_sessions()
+    sessions = get_usable_sessions()
     if not sessions:
-        raise RuntimeError('No session files found')
+        raise RuntimeError('No working session files found')
     if not use_all_sessions and (session_index < 0 or session_index >= len(sessions)):
         raise RuntimeError(f'session-index out of range: 0..{len(sessions) - 1}')
 
@@ -228,7 +228,7 @@ async def run_inviter(
                 progress['active_session'] = session
             except PeerFloodError:
                 set_account_cooldown(session, max_flood_wait * 2, 'peer-flood')
-                set_account_health(session, 'limited', 'Спам-ограничение Telegram (PeerFlood)')
+                set_account_health(session, 'flooded', 'Спам-ограничение Telegram (PeerFlood)', reason_code='flood_wait', reason_text='Спам-ограничение Telegram (PeerFlood)')
                 mark_invite_result(source_row, invite_target, username, user_id, 'peer_flood', 'PeerFloodError')
                 stats['errors'] += 2
                 stats['extra_sleep'] += 4
@@ -239,7 +239,7 @@ async def run_inviter(
             except FloodWaitError as e:
                 wait_s = int(e.seconds)
                 set_account_cooldown(session, wait_s, 'flood-wait')
-                set_account_health(session, 'limited', f'Ожидание из-за лимитов: {wait_s} сек')
+                set_account_health(session, 'flooded', f'Ожидание из-за лимитов: {wait_s} сек', reason_code='flood_wait', reason_text=f'Ожидание из-за лимитов: {wait_s} сек')
                 mark_invite_result(source_row, invite_target, username, user_id, 'flood_wait', str(wait_s))
                 stats['errors'] += 1
                 stats['extra_sleep'] += 2
@@ -252,9 +252,11 @@ async def run_inviter(
             except Exception as e:
                 err_name = e.__class__.__name__
                 if err_name in {'AuthKeyUnregisteredError', 'SessionRevokedError', 'UserDeactivatedError', 'UserDeactivatedBanError', 'PhoneNumberBannedError'}:
-                    set_account_health(session, 'dead', 'Сессия/аккаунт недействительны или заблокированы')
+                    status = 'invalid' if err_name in {'AuthKeyUnregisteredError', 'SessionRevokedError'} else 'dead'
+                    code = 'session_invalid' if status == 'invalid' else 'deleted_account'
+                    set_account_health(session, status, 'Сессия/аккаунт недействительны или заблокированы', reason_code=code, reason_text='Сессия/аккаунт недействительны или заблокированы')
                 else:
-                    set_account_health(session, 'limited', f'Ошибка работы аккаунта: {err_name}')
+                    set_account_health(session, 'limited', f'Ошибка работы аккаунта: {err_name}', reason_code='rpc_error', reason_text=f'Ошибка работы аккаунта: {err_name}')
                 mark_invite_result(source_row, invite_target, username, user_id, 'error', str(e))
                 stats['errors'] += 1
                 stats['extra_sleep'] += 1
