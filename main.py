@@ -44,6 +44,7 @@ from repositories.segments import SegmentRepository
 from repositories.users import UserRepository
 from services.campaign_service import CampaignService
 from services.join_request_service import JoinRequestService
+from services.target_normalizer import INVITE_TYPE, parse_target
 from telegram.webhook_handlers import (
 	handle_chat_join_request as process_chat_join_request_update,
 	handle_chat_member_update as process_chat_member_update,
@@ -625,18 +626,25 @@ def _format_progress_text(item, progress):
 			text += f'\nПоследняя ошибка: {last_error[:300]}'
 		return text
 	if mode == 'join_target':
+		target_type = 'private invite' if progress.get('target_type') == INVITE_TYPE else 'public username'
 		text = (
 			f'➕ Вход аккаунтов в цель\n'
 			f'Цель: {progress.get("target", "-")}\n'
+			f'Тип: {target_type}\n'
+			f'Метод: {progress.get("join_method", "-")}\n'
 			f'Аккаунт: {progress.get("active_session", "-")}\n'
 			f'Готово: {progress.get("done_accounts", 0)}/{progress.get("total_accounts", 0)}\n'
 			f'Вошли: {progress.get("joined", 0)}\n'
-			f'Уже были: {progress.get("already", 0)}\n'
-			f'Ошибки: {progress.get("failed", 0)}'
+			f'Уже были: {progress.get("already_in", progress.get("already", 0))}\n'
+			f'Заявка: {progress.get("join_request_sent", 0)}\n'
+			f'Invite ошибки: {progress.get("invite_errors", 0)} | Аккаунты: {progress.get("account_errors", 0)}'
 		)
-		last_error = str(progress.get('last_error', '') or '').strip()
-		if last_error:
-			text += f'\nПоследняя ошибка: {last_error[:300]}'
+		last_code = str(progress.get('last_error_code', '') or '').strip()
+		last_text = str(progress.get('last_error_text', '') or '').strip()
+		if last_code:
+			text += f'\nПоследняя ошибка: {last_code}'
+			if last_text:
+				text += f'\n{last_text[:220]}'
 		return text
 	if mode == 'inviter':
 		return (
@@ -729,18 +737,26 @@ def _queue_worker():
 						text += f'\n\nПоследняя ошибка:\n{last_error[:800]}'
 					_render_inline(item['user_id'], msg_id, text, parse_mode=None)
 				elif progress.get('mode') == 'join_target':
+					target_type = 'private invite' if progress.get('target_type') == INVITE_TYPE else 'public username'
 					text = (
 						f'✅ Завершено: {item["title"]}\n'
 						f'Код: {code}\n'
 						f'Цель: {progress.get("target", "-")}\n'
+						f'Тип: {target_type}\n'
+						f'Метод: {progress.get("join_method", "-")}\n'
 						f'Аккаунтов обработано: {progress.get("done_accounts", 0)}/{progress.get("total_accounts", 0)}\n'
 						f'Вошли: {progress.get("joined", 0)}\n'
-						f'Уже были внутри: {progress.get("already", 0)}\n'
-						f'С ошибками: {progress.get("failed", 0)}'
+						f'Уже внутри: {progress.get("already_in", progress.get("already", 0))}\n'
+						f'Заявка отправлена: {progress.get("join_request_sent", 0)}\n'
+						f'Ошибки invite: {progress.get("invite_errors", 0)}\n'
+						f'Ошибки аккаунтов: {progress.get("account_errors", 0)}'
 					)
-					last_error = str(progress.get('last_error', '') or '').strip()
-					if last_error:
-						text += f'\n\nПоследняя ошибка:\n{last_error[:800]}'
+					last_code = str(progress.get('last_error_code', '') or '').strip()
+					last_text = str(progress.get('last_error_text', '') or '').strip()
+					if last_code:
+						text += f'\n\nПоследняя ошибка: {last_code}'
+						if last_text:
+							text += f'\n{last_text[:600]}'
 					_render_inline(item['user_id'], msg_id, text, parse_mode=None)
 				else:
 					_render_inline(item['user_id'], msg_id, f'✅ Завершено: {item["title"]}\nКод: {code}', parse_mode=None)
@@ -2277,6 +2293,16 @@ def join_target_step_target(message):
 	if target == '':
 		bot.send_message(message.chat.id, '⚠️ Цель пустая. Введи @chat, @channel или ссылку-приглашение.', reply_markup=_step_keyboard())
 		return
+	try:
+		parsed_target = parse_target(target)
+	except Exception as e:
+		bot.send_message(
+			message.chat.id,
+			f'⚠️ Не удалось разобрать цель.\n{e}\n\nПоддерживается:\n<code>@name</code>\n<code>https://t.me/name</code>\n<code>https://t.me/+HASH</code>\n<code>https://t.me/joinchat/HASH</code>',
+			parse_mode='HTML',
+			reply_markup=_step_keyboard()
+		)
+		return
 	command = [
 		sys.executable, 'target_joiner.py',
 		'--target', target,
@@ -2289,7 +2315,9 @@ def join_target_step_target(message):
 		message.chat.id,
 		state.get('panel_msg_id'),
 		f'✅ <b>Вход аккаунтов поставлен в очередь</b>\n'
-		f'• Цель: <code>{target}</code>\n'
+		f'• Цель: <code>{parsed_target.display_value}</code>\n'
+		f'• Тип: <b>{"private invite" if parsed_target.target_type == INVITE_TYPE else "public username"}</b>\n'
+		f'• Метод: <code>{parsed_target.join_method}</code>\n'
 		f'• Аккаунтов: <b>{len(list_sessions())}</b>\n'
 		f'• Позиция: <b>~{queue_pos}</b>\n'
 		'Как только задача стартует — покажу живой прогресс.',
@@ -2935,6 +2963,7 @@ def podcategors(call):
 			'Поддерживается:\n'
 			'<code>@channel</code>\n'
 			'<code>@group</code>\n'
+			'<code>https://t.me/+HASH</code>\n'
 			'<code>https://t.me/...</code>\n'
 			'<code>https://t.me/joinchat/...</code>',
 			join_target_step_target
@@ -3078,6 +3107,12 @@ def podcategors(call):
 						p = json.load(f)
 					if p.get('mode') == 'parser':
 						extra = f' | parsed={p.get("users_parsed", 0)} users'
+					elif p.get('mode') == 'join_target':
+						extra = (
+							f' | joined={p.get("joined", 0)} '
+							f'already={p.get("already_in", p.get("already", 0))} '
+							f'failed={p.get("failed", 0)}'
+						)
 					elif p.get('mode') == 'inviter':
 						extra = f' | invited={p.get("invited", 0)} processed={p.get("processed", 0)}'
 				except Exception:

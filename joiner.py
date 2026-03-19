@@ -1,47 +1,48 @@
-from telethon.errors import InviteHashExpiredError, UserAlreadyParticipantError, ChannelsTooMuchError, FloodWaitError, UserBannedInChannelError
-from telethon.tl.functions.channels import JoinChannelRequest
-from telethon.tl.functions.messages import ImportChatInviteRequest
+from telethon.errors import FloodWaitError
 from loguru import logger
 from random import randint
 from time import sleep
 import asyncio
 
 from config import API_ID, API_HASH, slp, join_sleep, from_join_sleep, to_join_sleep
-from functions import get_sessions, get_proxy, generate_chats_list, link_convert, build_telegram_client
+from functions import get_sessions, get_proxy, generate_chats_list, build_telegram_client
 from db import insert_chat_db, get_all_chats, is_full
+from services.join_service import JoinService
 
 
 logger.add('logging.log', rotation='1 MB', encoding='utf-8')
+JOIN_SERVICE = JoinService()
 
 
 async def join_to_chat(chat, client, session):
     if chat in get_all_chats():
         return
-    chat_type, converted_chat = link_convert(chat)
+    parsed_target = None
     try:
-        insert_chat_db(session, converted_chat)
-        if chat_type == 'close':
-            await client(ImportChatInviteRequest(converted_chat))
-        else:
-            await client(JoinChannelRequest(converted_chat))
-        logger.info(f'{session} вступил в чат {converted_chat}')
+        parsed_target = JOIN_SERVICE.parse_target(chat)
+        insert_chat_db(session, parsed_target.normalized_value)
+        result = await JOIN_SERVICE.join_target(client, parsed_target)
+        status = result.get('status')
+        if status in {'joined', 'join_request_sent'}:
+            logger.info(f'{session} обработал цель {parsed_target.display_value}: {status}')
+        elif status == 'already_in':
+            logger.info(f'{session} уже состоит в чате: {parsed_target.display_value}')
+        elif status in {'invalid_invite', 'expired_invite', 'private_target_unresolved'}:
+            logger.error(f'{session} проблема с целью {parsed_target.display_value}: {status} | {result.get("error_text")}')
+            return
+        elif status in {'account_banned', 'session_invalid', 'account_limited', 'unknown_error'}:
+            logger.error(f'{session} ошибка аккаунта для {parsed_target.display_value}: {status} | {result.get("error_text")}')
+            return
         if join_sleep != 0:
             await asyncio.sleep(join_sleep)
         else:
             await asyncio.sleep(randint(from_join_sleep, to_join_sleep))
-    except (InviteHashExpiredError, ValueError):
-        logger.error(f'{session} ссылка не рабочая: {converted_chat}')
-    except UserAlreadyParticipantError:
-        logger.error(f'{session} уже состоит в чате: {converted_chat}')
-    except ChannelsTooMuchError:
-        logger.error(f'{session} достиг лимита чатов')
-    except UserBannedInChannelError:
-        logger.error(f'{session} заблокирован в чате: {converted_chat}')
     except FloodWaitError as e:
         logger.error(f'{session} flood wait: {e.seconds}')
         await asyncio.sleep(int(e.seconds))
     except Exception as e:
-        logger.error(f'{session} ошибка: {e}')
+        target_ref = parsed_target.display_value if parsed_target else str(chat)
+        logger.error(f'{session} ошибка для {target_ref}: {e}')
         await asyncio.sleep(randint(5, 20))
 
 
