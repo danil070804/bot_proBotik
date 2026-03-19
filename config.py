@@ -18,6 +18,15 @@ def _str_env(name, default=''):
     return str(value).strip()
 
 
+def _bool_env(name, default=False):
+    value = str(os.getenv(name, '') or '').strip().lower()
+    if value in {'1', 'true', 'yes', 'on'}:
+        return True
+    if value in {'0', 'false', 'no', 'off'}:
+        return False
+    return bool(default)
+
+
 max_flood = _int_env('MAX_FLOOD', 999)
 file1 = os.getenv('CHATS_FILE', 'uslug.txt')
 full_chats = _int_env('FULL_CHATS', 30)
@@ -49,13 +58,19 @@ bot_invite_name = os.getenv('BOT_INVITE_NAME', '')
 bot_api_token = os.getenv('BOT_API_TOKEN', bot_invite_token)
 bot_api_base_url = os.getenv('BOT_API_BASE_URL', 'https://api.telegram.org')
 bot_api_timeout = _int_env('BOT_API_TIMEOUT', 30)
+_railway_public_domain = _str_env('RAILWAY_PUBLIC_DOMAIN')
+is_railway = any(str(key).startswith('RAILWAY_') for key in os.environ.keys()) or _bool_env('RAILWAY', False)
 webhook_base_url = _str_env('WEBHOOK_BASE_URL').rstrip('/')
+if not webhook_base_url and _railway_public_domain:
+    webhook_base_url = f'https://{_railway_public_domain}'.rstrip('/')
 webhook_path = os.getenv('WEBHOOK_PATH', '/webhook')
 webhook_secret_token = _str_env('WEBHOOK_SECRET_TOKEN')
 _bot_transport_raw = _str_env('BOT_TRANSPORT').lower()
 if _bot_transport_raw in {'polling', 'webhook'}:
     bot_transport = _bot_transport_raw
 elif webhook_base_url:
+    bot_transport = 'webhook'
+elif is_railway:
     bot_transport = 'webhook'
 else:
     bot_transport = 'polling'
