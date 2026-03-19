@@ -103,6 +103,12 @@ RUNNING_TASKS = {}
 TASK_QUEUE = Queue()
 TASK_LOCK = threading.Lock()
 UPLOAD_QUEUE = Queue()
+UPLOAD_BATCHES = {}
+UPLOAD_BATCH_LOCK = threading.Lock()
+UPLOAD_BATCH_WINDOW = 8
+RECENT_UPLOAD_DOCS = {}
+RECENT_UPLOAD_DOCS_LOCK = threading.Lock()
+RECENT_UPLOAD_DOCS_TTL = 180
 AUDIENCE_FILTERS = {}
 DEFAULT_APP_SETTINGS = {
 	'parser_posts_limit': '100',
@@ -1228,43 +1234,36 @@ def _notify_health_change_if_needed(session, prev_status, result):
 			pass
 
 
-def _process_uploaded_session(chat_id, filename):
+def _process_uploaded_session(filename):
 	result = _check_account_health(filename, deep_check=False)
 	prev = _store_account_health_result(filename, result)
 	_notify_health_change_if_needed(filename, prev, result)
-	if result.status in {'dead', 'invalid'}:
-		bot.send_message(
-			chat_id,
-			f'⚠️ <b>Аккаунт не прошёл проверку</b>\n'
-			f'Файл сохранён: <code>{filename}</code>\n'
-			f'Причина: <code>{result.reason_code}</code>\n'
-			f'Детали: <code>{_health_details_ru(result.reason_text)[:300]}</code>\n\n'
-			'Автоудаление отключено: файл оставлен как есть, удалить его можно вручную из меню аккаунтов.',
-			parse_mode='HTML'
-		)
-		return
+	warmup_days = 0
 	if result.status == 'working':
 		warmup_days = max(0, _setting_int('account_warmup_days'))
 		set_account_warmup(filename, warmup_days * 86400)
-		warmup_text = f'\nПрогрев до инвайта: <b>{warmup_days} дн.</b>' if warmup_days > 0 else ''
-	else:
-		warmup_text = ''
-	bot.send_message(
-		chat_id,
-		f'✅ Аккаунт добавлен: <code>{filename}</code>\n'
-		f'Статус: {_account_status_emoji(result.status)} <b>{_account_status_title(result.status)}</b>\n'
-		f'Причина: <code>{result.reason_code}</code>\n'
-		f'Детали: <code>{_health_details_ru(result.reason_text)[:300]}</code>\n'
-		f'Всего аккаунтов: <b>{len(list_sessions())}</b>{warmup_text}',
-		parse_mode='HTML'
-	)
+	return {
+		'status': result.status,
+		'reason_code': result.reason_code,
+		'reason_text': result.reason_text,
+		'warmup_days': warmup_days,
+	}
 
 
 def _upload_worker():
 	while True:
 		item = UPLOAD_QUEUE.get()
 		try:
-			_process_uploaded_session(item['chat_id'], item['filename'])
+			try:
+				result = _process_uploaded_session(item['filename'])
+			except Exception as e:
+				result = {
+					'status': 'invalid',
+					'reason_code': 'upload_processing_failed',
+					'reason_text': str(e),
+					'warmup_days': 0,
+				}
+			_finalize_upload_batch(item['chat_id'], item.get('batch_id'), item['filename'], result)
 		finally:
 			UPLOAD_QUEUE.task_done()
 
@@ -1277,10 +1276,144 @@ def _ensure_upload_worker():
 	_ensure_upload_worker.started = True
 
 
-def _enqueue_uploaded_session(chat_id, filename):
+def _cleanup_recent_upload_docs(now_ts=None):
+	now_ts = float(now_ts or time.time())
+	with RECENT_UPLOAD_DOCS_LOCK:
+		for key, ts in list(RECENT_UPLOAD_DOCS.items()):
+			if now_ts - float(ts or 0) > RECENT_UPLOAD_DOCS_TTL:
+				RECENT_UPLOAD_DOCS.pop(key, None)
+
+
+def _is_duplicate_upload(chat_id, document):
+	if not document:
+		return False
+	now_ts = time.time()
+	_cleanup_recent_upload_docs(now_ts)
+	key = f'{int(chat_id)}:{getattr(document, "file_unique_id", "") or getattr(document, "file_id", "")}'
+	with RECENT_UPLOAD_DOCS_LOCK:
+		if key in RECENT_UPLOAD_DOCS:
+			return True
+		RECENT_UPLOAD_DOCS[key] = now_ts
+	return False
+
+
+def _new_upload_batch(chat_id):
+	batch_id = f'{int(chat_id)}:{int(time.time() * 1000)}'
+	return {
+		'batch_id': batch_id,
+		'chat_id': int(chat_id),
+		'created_at': time.time(),
+		'updated_at': time.time(),
+		'queued': 0,
+		'processed': 0,
+		'counts': {'working': 0, 'limited': 0, 'flooded': 0, 'dead': 0, 'invalid': 0},
+		'files': [],
+		'errors': [],
+		'message_id': None,
+		'closed': False,
+	}
+
+
+def _get_or_create_upload_batch(chat_id):
+	with UPLOAD_BATCH_LOCK:
+		batch = UPLOAD_BATCHES.get(int(chat_id))
+		if batch and not batch.get('closed') and time.time() - float(batch.get('updated_at') or 0) <= UPLOAD_BATCH_WINDOW:
+			return batch.get('batch_id')
+		batch = _new_upload_batch(chat_id)
+		UPLOAD_BATCHES[int(chat_id)] = batch
+		return batch.get('batch_id')
+
+
+def _queue_uploaded_file(chat_id, filename):
+	batch_id = _get_or_create_upload_batch(chat_id)
+	with UPLOAD_BATCH_LOCK:
+		batch = UPLOAD_BATCHES.get(int(chat_id))
+		if not batch:
+			batch = _new_upload_batch(chat_id)
+			UPLOAD_BATCHES[int(chat_id)] = batch
+			batch_id = batch.get('batch_id')
+		batch['updated_at'] = time.time()
+		batch['queued'] = int(batch.get('queued') or 0) + 1
+		files = list(batch.get('files') or [])
+		files.append(str(filename))
+		batch['files'] = files[-8:]
 	_ensure_upload_worker()
-	UPLOAD_QUEUE.put({'chat_id': chat_id, 'filename': filename})
-	return UPLOAD_QUEUE.qsize()
+	UPLOAD_QUEUE.put({'chat_id': chat_id, 'filename': filename, 'batch_id': batch_id})
+	return batch_id, UPLOAD_QUEUE.qsize()
+
+
+def _upload_batch_text(batch):
+	batch = dict(batch or {})
+	counts = dict(batch.get('counts') or {})
+	queued = int(batch.get('queued') or 0)
+	processed = int(batch.get('processed') or 0)
+	pending = max(0, queued - processed)
+	files = list(batch.get('files') or [])
+	status = '✅ Завершено' if queued > 0 and processed >= queued else '⏳ Загрузка аккаунтов'
+	lines = [
+		f'{status}',
+		'',
+		f'Файлов: <b>{queued}</b>',
+		f'Обработано: <b>{processed}</b>',
+		f'В очереди: <b>{pending}</b>',
+	]
+	if processed > 0:
+		lines.extend(
+			[
+				f'🟢 Рабочие: <b>{int(counts.get("working") or 0)}</b>',
+				f'🟡 Ограничены: <b>{int(counts.get("limited") or 0)}</b>',
+				f'🟠 Flood: <b>{int(counts.get("flooded") or 0)}</b>',
+				f'🔴 Мёртвые: <b>{int(counts.get("dead") or 0)}</b>',
+				f'⚫ Не авторизованы: <b>{int(counts.get("invalid") or 0)}</b>',
+			]
+		)
+	if files:
+		lines.append('')
+		lines.append('Последние файлы:')
+		for name in files[-4:]:
+			lines.append(f'• <code>{name}</code>')
+	errors = list(batch.get('errors') or [])
+	if errors:
+		lines.append('')
+		lines.append('Последние проблемы:')
+		for row in errors[-2:]:
+			lines.append(f'• <code>{row}</code>')
+	return '\n'.join(lines)
+
+
+def _render_upload_batch(chat_id, batch_id):
+	with UPLOAD_BATCH_LOCK:
+		batch = dict((UPLOAD_BATCHES.get(int(chat_id)) or {}))
+	if not batch or batch.get('batch_id') != batch_id:
+		return None
+	message_id = batch.get('message_id')
+	new_message_id = _render_inline(chat_id, message_id, _upload_batch_text(batch), parse_mode='HTML')
+	with UPLOAD_BATCH_LOCK:
+		current = UPLOAD_BATCHES.get(int(chat_id))
+		if current and current.get('batch_id') == batch_id:
+			current['message_id'] = new_message_id
+	return new_message_id
+
+
+def _finalize_upload_batch(chat_id, batch_id, filename, result):
+	with UPLOAD_BATCH_LOCK:
+		batch = UPLOAD_BATCHES.get(int(chat_id))
+		if not batch or batch.get('batch_id') != batch_id:
+			return
+		batch['updated_at'] = time.time()
+		batch['processed'] = int(batch.get('processed') or 0) + 1
+		counts = dict(batch.get('counts') or {})
+		status = str((result or {}).get('status') or 'invalid').strip().lower()
+		counts[status] = int(counts.get(status) or 0) + 1
+		batch['counts'] = counts
+		if status in {'dead', 'invalid'}:
+			errors = list(batch.get('errors') or [])
+			reason = str((result or {}).get('reason_code') or status)
+			errors.append(f'{filename}: {reason}')
+			batch['errors'] = errors[-6:]
+		if int(batch.get('processed') or 0) >= int(batch.get('queued') or 0):
+			batch['closed'] = True
+	_render_upload_batch(chat_id, batch_id)
 
 
 def _save_targets_file(user_id, text_value, prefix):
@@ -2548,6 +2681,8 @@ def receive_session_file(message):
 	state = USER_STATE.get(message.chat.id, {})
 	if not doc:
 		return
+	if _is_duplicate_upload(message.chat.id, doc):
+		return
 	file_info = bot.get_file(doc.file_id)
 	data = bot.download_file(file_info.file_path)
 	filename = os.path.basename(doc.file_name)
@@ -2573,14 +2708,8 @@ def receive_session_file(message):
 	save_session_file(filename, data)
 	with open(filename, 'wb') as f:
 		f.write(data)
-	queue_pos = _enqueue_uploaded_session(message.chat.id, filename)
-	bot.send_message(
-		message.chat.id,
-		f'⏳ Файл <code>{filename}</code> загружен.\n'
-		f'Добавлен в очередь обработки: <b>~{queue_pos}</b>.\n'
-		'Можно отправлять следующие файлы — обработаю по очереди.',
-		parse_mode='HTML'
-	)
+	batch_id, queue_pos = _queue_uploaded_file(message.chat.id, filename)
+	_render_upload_batch(message.chat.id, batch_id)
 
 
 def community_add_step_title(message):
