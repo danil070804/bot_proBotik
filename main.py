@@ -173,8 +173,12 @@ PRESET_CONFIGS = {
 def build_new_menu():
 	keyboard = types.InlineKeyboardMarkup()
 	keyboard.add(
-		types.InlineKeyboardButton(text='📂 Сообщества', callback_data='communities_menu'),
+		types.InlineKeyboardButton(text='🔑 Аккаунты', callback_data='accounts_menu'),
+		types.InlineKeyboardButton(text='📡 Парсинг', callback_data='parsing_menu'),
+	)
+	keyboard.add(
 		types.InlineKeyboardButton(text='👥 Аудитория', callback_data='audience_menu'),
+		types.InlineKeyboardButton(text='📂 Сообщества', callback_data='communities_menu'),
 	)
 	keyboard.add(
 		types.InlineKeyboardButton(text='🚀 Кампании', callback_data='campaigns_menu'),
@@ -182,9 +186,12 @@ def build_new_menu():
 	)
 	keyboard.add(
 		types.InlineKeyboardButton(text='📊 Аналитика', callback_data='stats_overview'),
-		types.InlineKeyboardButton(text='⚙️ Настройки', callback_data='settings_menu'),
+		types.InlineKeyboardButton(text='📈 Статус', callback_data='task_status'),
 	)
-	keyboard.add(types.InlineKeyboardButton(text='ℹ️ Помощь', callback_data='help_new'))
+	keyboard.add(
+		types.InlineKeyboardButton(text='⚙️ Настройки', callback_data='settings_menu'),
+		types.InlineKeyboardButton(text='ℹ️ Помощь', callback_data='help_new'),
+	)
 	return keyboard
 
 
@@ -206,10 +213,24 @@ def _main_dashboard_text():
 		audience = USER_REPO.summary()
 		campaigns = CAMPAIGN_REPO.list()
 		join_pending = JOIN_REQUEST_REPO.list(status='pending', limit=1000)
+		parse_users = 0
+		parse_comments = 0
+		try:
+			connection = get_main_connection()
+			cursor = connection.cursor()
+			cursor.execute('SELECT COUNT(*) FROM parsed_usernames')
+			parse_users = int((cursor.fetchone() or [0])[0] or 0)
+			cursor.execute('SELECT COUNT(*) FROM parsed_comments')
+			parse_comments = int((cursor.fetchone() or [0])[0] or 0)
+			connection.close()
+		except Exception:
+			pass
 		running = len([c for c in campaigns if c.get('status') == 'running'])
 		scheduled = len([c for c in campaigns if c.get('status') == 'scheduled'])
 		return (
 			'🏠 <b>Invite Platform</b>\n\n'
+			f'🔑 Аккаунты: <b>{len(list_sessions())}</b>\n'
+			f'📡 Парсинг: usernames=<b>{parse_users}</b>, comments=<b>{parse_comments}</b>\n'
 			f'📂 Сообщества: <b>{len(communities)}</b>\n'
 			f'👥 Аудитория: <b>{audience.get("total", 0)}</b> '
 			f'(active={audience.get("active", 0)}, blacklist={audience.get("blacklisted", 0)}, unsubscribed={audience.get("unsubscribed", 0)})\n'
@@ -217,7 +238,7 @@ def _main_dashboard_text():
 			f'(running={running}, scheduled={scheduled})\n'
 			f'📨 Заявки в ожидании: <b>{len(join_pending)}</b>\n\n'
 			'Новый основной pipeline:\n'
-			'<code>Аудитория -> Кампания -> Invite Link -> Join Request -> Approval</code>'
+			'<code>Парсинг -> Аудитория -> Кампания -> Invite Link -> Join Request -> Approval</code>'
 		)
 	except Exception as e:
 		return f'🏠 <b>Invite Platform</b>\n\nНе удалось собрать dashboard: <code>{e}</code>'
@@ -298,6 +319,28 @@ def _join_requests_text(status='pending'):
 			f'status={item.get("status")}'
 		)
 	return '\n'.join(lines)
+
+
+def _parsing_text():
+	try:
+		connection = get_main_connection()
+		cursor = connection.cursor()
+		cursor.execute('SELECT COUNT(*) FROM parsed_usernames')
+		parsed_users = int((cursor.fetchone() or [0])[0] or 0)
+		cursor.execute('SELECT COUNT(*) FROM parsed_comments')
+		parsed_comments = int((cursor.fetchone() or [0])[0] or 0)
+		connection.close()
+	except Exception:
+		parsed_users = 0
+		parsed_comments = 0
+	return (
+		'📡 <b>Парсинг аудитории</b>\n'
+		'Модуль сбора аудитории сохранён в продукте и работает как источник для кампаний.\n\n'
+		f'В базе парсинга: usernames=<b>{parsed_users}</b>, comments=<b>{parsed_comments}</b>\n'
+		f'Текущие лимиты: posts={_setting_int("parser_posts_limit")}, comments={_setting_int("parser_comments_limit")}, '
+		f'all_sessions={"ВКЛ" if _setting_bool("parser_use_all_sessions") else "ВЫКЛ"}\n\n'
+		'Результат парсинга должен попадать в аудиторию для дальнейших кампаний.'
+	)
 
 
 def list_sessions():
@@ -860,13 +903,21 @@ def _send_html_chunks(chat_id, header, lines, chunk_size=3500):
 def _guide_text():
 	return (
 		'ℹ️ <b>Invite Platform</b>\n\n'
-		'📂 <b>Сообщества</b>\n'
-		'• Хранят Telegram chat_id, тип сообщества, default mode и auto-approve.\n'
-		'• Используются как цель для invite-link и join-request кампаний.\n\n'
+		'🔑 <b>Аккаунты</b>\n'
+		'• Загружай <code>.session</code> или <code>.json</code> как документ.\n'
+		'• Аккаунты используются для парсинга и технических проверок доступности источников.\n'
+		'• Health-check и прогрев остаются отдельным служебным модулем.\n\n'
+		'📡 <b>Парсинг</b>\n'
+		'• Сбор аудитории из участников, комментариев и авторов сообщений.\n'
+		'• Парсинг не ведёт в direct add member, а пополняет аудиторию для кампаний.\n'
+		'• Поддерживаются live-progress и повторный запуск задач.\n\n'
 		'👥 <b>Аудитория</b>\n'
 		'• Ручное добавление пользователей.\n'
 		'• Импорт своей базы через CSV/JSON.\n'
-		'• Поддержка blacklist и unsubscribe.\n\n'
+		'• Хранение результатов парсинга, blacklist и unsubscribe.\n\n'
+		'📂 <b>Сообщества</b>\n'
+		'• Хранят Telegram chat_id, тип сообщества, default mode и auto-approve.\n'
+		'• Используются как цель для invite-link и join-request кампаний.\n\n'
 		'🚀 <b>Кампании</b>\n'
 		'• Создаются поверх аудитории и сообщества.\n'
 		'• Режимы: <code>invite_link</code>, <code>join_request</code>, <code>auto</code>.\n'
@@ -888,6 +939,7 @@ def _guide_text():
 
 def _flow_title(flow):
 	return {
+		'parser': 'Парсинг',
 		'community_add': 'Сообщество',
 		'audience_add': 'Аудитория',
 		'audience_import': 'Импорт аудитории',
@@ -908,7 +960,7 @@ def _ensure_sessions_or_warn(chat_id, message_id=None):
 		return True
 	text = (
 		'⛔ <b>Невозможно запустить сценарий</b>\n'
-		'Сначала добавьте хотя бы <b>1 .session</b> аккаунт в разделе «Аккаунты • Session».'
+		'Сначала добавьте хотя бы <b>1 .session</b> аккаунт в разделе «Аккаунты».'
 	)
 	if message_id:
 		_render_inline(chat_id, message_id, text, parse_mode='HTML', reply_markup=build_new_menu())
@@ -1012,6 +1064,9 @@ def _setting_bool(key):
 
 def _setting_title(key):
 	titles = {
+		'parser_posts_limit': 'Лимит постов парсинга',
+		'parser_comments_limit': 'Лимит комментариев парсинга',
+		'parser_use_all_sessions': 'Использовать все аккаунты в парсинге',
 		'campaign_rate_limit_per_minute': 'Rate limit в минуту',
 		'campaign_rate_limit_per_hour': 'Rate limit в час',
 		'campaign_max_attempts': 'Максимум попыток доставки',
@@ -1043,6 +1098,8 @@ def _settings_text():
 	return (
 		'⚙️ Настройки платформы\n'
 		f'• Активный пресет: <b>{_preset_title(_get_setting("active_preset"))}</b>\n'
+		f'• Парсинг: posts={_setting_int("parser_posts_limit")}, comments={_setting_int("parser_comments_limit")}, '
+		f'all_sessions={"ВКЛ" if _setting_bool("parser_use_all_sessions") else "ВЫКЛ"}\n'
 		f'• Rate limit: {_setting_int("campaign_rate_limit_per_minute")}/мин, {_setting_int("campaign_rate_limit_per_hour")}/час\n'
 		f'• Max attempts: {_setting_int("campaign_max_attempts")}\n'
 		f'• Stop on error rate: {_get_setting("campaign_stop_on_error_rate")}\n'
@@ -1059,13 +1116,18 @@ def _build_settings_menu():
 	)
 	keyboard.add(types.InlineKeyboardButton(text='🔴 Пресет: Агрессивный', callback_data='settings_preset|aggressive'))
 	keyboard.add(
-		types.InlineKeyboardButton(text='✏️ Лимит / мин', callback_data='settings_edit|campaign_rate_limit_per_minute'),
-		types.InlineKeyboardButton(text='✏️ Лимит / час', callback_data='settings_edit|campaign_rate_limit_per_hour'),
+		types.InlineKeyboardButton(text='✏️ Посты парсинга', callback_data='settings_edit|parser_posts_limit'),
+		types.InlineKeyboardButton(text='✏️ Комментарии', callback_data='settings_edit|parser_comments_limit'),
 	)
 	keyboard.add(
-		types.InlineKeyboardButton(text='✏️ Max attempts', callback_data='settings_edit|campaign_max_attempts'),
-		types.InlineKeyboardButton(text='✏️ Error-rate', callback_data='settings_edit|campaign_stop_on_error_rate'),
+		types.InlineKeyboardButton(text='🔁 Все аккаунты парсинга', callback_data='settings_toggle|parser_use_all_sessions'),
+		types.InlineKeyboardButton(text='✏️ Лимит / мин', callback_data='settings_edit|campaign_rate_limit_per_minute'),
 	)
+	keyboard.add(
+		types.InlineKeyboardButton(text='✏️ Лимит / час', callback_data='settings_edit|campaign_rate_limit_per_hour'),
+		types.InlineKeyboardButton(text='✏️ Max attempts', callback_data='settings_edit|campaign_max_attempts'),
+	)
+	keyboard.add(types.InlineKeyboardButton(text='✏️ Error-rate', callback_data='settings_edit|campaign_stop_on_error_rate'))
 	keyboard.add(types.InlineKeyboardButton(text='🕒 Дни прогрева аккаунтов', callback_data='settings_edit|account_warmup_days'))
 	keyboard.add(
 		types.InlineKeyboardButton(text='🧩 Аккаунты', callback_data='accounts_menu'),
@@ -1095,6 +1157,20 @@ def _build_audience_menu():
 	keyboard.add(
 		types.InlineKeyboardButton(text='📋 Список', callback_data='audience_list'),
 		types.InlineKeyboardButton(text='🚫 Blacklist', callback_data='audience_blacklist_list'),
+	)
+	keyboard.add(types.InlineKeyboardButton(text='⬅️ Назад', callback_data='main_menu'))
+	return keyboard
+
+
+def _build_parser_menu():
+	keyboard = types.InlineKeyboardMarkup()
+	keyboard.add(
+		types.InlineKeyboardButton(text='▶️ Запустить', callback_data='parser_start'),
+		types.InlineKeyboardButton(text='📈 Статус', callback_data='task_status'),
+	)
+	keyboard.add(
+		types.InlineKeyboardButton(text='⚙️ Настройки парсинга', callback_data='settings_menu'),
+		types.InlineKeyboardButton(text='👥 В аудиторию', callback_data='audience_menu'),
 	)
 	keyboard.add(types.InlineKeyboardButton(text='⬅️ Назад', callback_data='main_menu'))
 	return keyboard
@@ -1226,6 +1302,18 @@ def _stats_text():
 	try:
 		campaigns = CAMPAIGN_REPO.list()
 		join_requests = JOIN_REQUEST_REPO.list(limit=5000)
+		parse_users = 0
+		parse_comments = 0
+		try:
+			connection = get_main_connection()
+			cursor = connection.cursor()
+			cursor.execute('SELECT COUNT(*) FROM parsed_usernames')
+			parse_users = int((cursor.fetchone() or [0])[0] or 0)
+			cursor.execute('SELECT COUNT(*) FROM parsed_comments')
+			parse_comments = int((cursor.fetchone() or [0])[0] or 0)
+			connection.close()
+		except Exception:
+			pass
 		total_stats = {
 			'sent': 0,
 			'delivered': 0,
@@ -1247,6 +1335,8 @@ def _stats_text():
 		audience = USER_REPO.summary()
 		return (
 			f'📊 <b>Аналитика платформы</b>\n'
+			f'Аккаунтов: <b>{len(list_sessions())}</b>\n'
+			f'Парсинг: usernames=<b>{parse_users}</b>, comments=<b>{parse_comments}</b>\n'
 			f'Сообществ: <b>{len(COMMUNITY_REPO.list())}</b>\n'
 			f'Пользователей: <b>{audience.get("total", 0)}</b>\n'
 			f'Кампаний: <b>{len(campaigns)}</b>\n'
@@ -1888,7 +1978,7 @@ def parser_step_comments(message):
 		bot.send_message(message.chat.id, '⚠️ Не нашёл источники. Запусти парсинг заново.', reply_markup=build_new_menu())
 		return
 	command = [
-		sys.executable, 'parser.py',
+		sys.executable, os.path.join('workers', 'parser_worker.py'),
 		'--targets-file', file_name,
 		'--posts-limit', str(state.get('posts_limit', 100)),
 		'--comments-limit', str(comments_limit)
@@ -2102,6 +2192,10 @@ def podcategors(call):
 
 	if call.data == 'settings_menu':
 		_render_inline(call.message.chat.id, call.message.message_id, _settings_text(), parse_mode='HTML', reply_markup=_build_settings_menu())
+		return
+
+	if call.data == 'parsing_menu':
+		_render_inline(call.message.chat.id, call.message.message_id, _parsing_text(), parse_mode='HTML', reply_markup=_build_parser_menu())
 		return
 
 	if call.data == 'communities_menu':

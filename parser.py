@@ -7,7 +7,7 @@ from telethon.errors import FloodWaitError, UserAlreadyParticipantError
 from telethon.tl.functions.channels import JoinChannelRequest
 
 from config import API_ID, API_HASH
-from db import save_parsed_user, save_parsed_comment, is_source_allowed
+from db import save_parsed_user, save_parsed_comment, is_source_allowed, upsert_user
 from functions import get_sessions, get_proxy, build_telegram_client
 
 
@@ -71,9 +71,19 @@ async def parse_members(client, target):
     count = 0
     try:
         async for user in client.iter_participants(target):
-            if user and user.username:
+            if not user or not getattr(user, 'id', None):
+                continue
+            upsert_user(
+                telegram_user_id=user.id,
+                username=getattr(user, 'username', '') or '',
+                first_name=getattr(user, 'first_name', '') or '',
+                source=target,
+                consent_status='parsed',
+                tags=[f'source:{target}', 'parsed', 'members'],
+            )
+            if getattr(user, 'username', None):
                 save_parsed_user(target, user.username, user.id)
-                count += 1
+            count += 1
     except Exception as e:
         logger.warning(f'Не удалось собрать участников {target}: {e}')
     return count
@@ -89,6 +99,15 @@ async def parse_comments(client, target, posts_limit, comments_limit):
                 async for comment in client.iter_messages(target, reply_to=post.id, limit=comments_limit):
                     if comment and comment.sender_id:
                         sender = await comment.get_sender()
+                        if sender and getattr(sender, 'id', None):
+                            upsert_user(
+                                telegram_user_id=sender.id,
+                                username=getattr(sender, 'username', '') or '',
+                                first_name=getattr(sender, 'first_name', '') or '',
+                                source=target,
+                                consent_status='parsed',
+                                tags=[f'source:{target}', 'parsed', 'commenters'],
+                            )
                         if sender and getattr(sender, 'username', None):
                             save_parsed_comment(
                                 target=target,
