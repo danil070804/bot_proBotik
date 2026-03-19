@@ -35,9 +35,12 @@ from telethon.errors import UserAlreadyParticipantError
 from telethon.tl.functions.channels import JoinChannelRequest
 from telethon.tl.functions.messages import ImportChatInviteRequest
 from functions import get_proxy, get_sessions, build_telegram_client
+from repositories.audience import AudienceRepository
 from repositories.campaigns import CampaignRepository
 from repositories.communities import CommunityRepository
 from repositories.join_requests import JoinRequestRepository
+from repositories.parse_tasks import ParseTaskRepository
+from repositories.segments import SegmentRepository
 from repositories.users import UserRepository
 from services.campaign_service import CampaignService
 from services.join_request_service import JoinRequestService
@@ -57,9 +60,12 @@ admin = config.admin
 ADMINS = set(getattr(config, 'admins', [admin]))
 init_db()
 USER_REPO = UserRepository()
+AUDIENCE_REPO = AudienceRepository()
 COMMUNITY_REPO = CommunityRepository()
 CAMPAIGN_REPO = CampaignRepository()
 JOIN_REQUEST_REPO = JoinRequestRepository()
+PARSE_TASK_REPO = ParseTaskRepository()
+SEGMENT_REPO = SegmentRepository()
 CAMPAIGN_SERVICE = CampaignService(campaigns=CAMPAIGN_REPO, communities=COMMUNITY_REPO)
 JOIN_REQUEST_SERVICE = JoinRequestService(
 	communities=COMMUNITY_REPO,
@@ -210,27 +216,17 @@ def _community_mode_title(mode):
 def _main_dashboard_text():
 	try:
 		communities = COMMUNITY_REPO.list()
-		audience = USER_REPO.summary()
+		audience = AUDIENCE_REPO.summary()
+		parse_summary = PARSE_TASK_REPO.summary()
 		campaigns = CAMPAIGN_REPO.list()
 		join_pending = JOIN_REQUEST_REPO.list(status='pending', limit=1000)
-		parse_users = 0
-		parse_comments = 0
-		try:
-			connection = get_main_connection()
-			cursor = connection.cursor()
-			cursor.execute('SELECT COUNT(*) FROM parsed_usernames')
-			parse_users = int((cursor.fetchone() or [0])[0] or 0)
-			cursor.execute('SELECT COUNT(*) FROM parsed_comments')
-			parse_comments = int((cursor.fetchone() or [0])[0] or 0)
-			connection.close()
-		except Exception:
-			pass
 		running = len([c for c in campaigns if c.get('status') == 'running'])
 		scheduled = len([c for c in campaigns if c.get('status') == 'scheduled'])
 		return (
 			'🏠 <b>Invite Platform</b>\n\n'
 			f'🔑 Аккаунты: <b>{len(list_sessions())}</b>\n'
-			f'📡 Парсинг: usernames=<b>{parse_users}</b>, comments=<b>{parse_comments}</b>\n'
+			f'📡 Парсинг: задач=<b>{parse_summary.get("total", 0)}</b>, running=<b>{parse_summary.get("running", 0)}</b>, '
+			f'saved=<b>{parse_summary.get("total_saved", 0)}</b>\n'
 			f'📂 Сообщества: <b>{len(communities)}</b>\n'
 			f'👥 Аудитория: <b>{audience.get("total", 0)}</b> '
 			f'(active={audience.get("active", 0)}, blacklist={audience.get("blacklisted", 0)}, unsubscribed={audience.get("unsubscribed", 0)})\n'
@@ -264,19 +260,21 @@ def _communities_text():
 
 
 def _audience_text():
-	summary = USER_REPO.summary()
+	summary = AUDIENCE_REPO.summary()
 	lines = [
 		'👥 <b>Аудитория</b>',
 		f'Всего пользователей: <b>{summary.get("total", 0)}</b>',
 		f'Активных: <b>{summary.get("active", 0)}</b>',
 		f'Blacklisted: <b>{summary.get("blacklisted", 0)}</b>',
 		f'Unsubscribed: <b>{summary.get("unsubscribed", 0)}</b>',
-		'Поддерживается импорт CSV/JSON и ручное добавление.',
+		f'С username: <b>{summary.get("with_username", 0)}</b> | без username: <b>{summary.get("without_username", 0)}</b>',
+		f'Источников: <b>{summary.get("sources", 0)}</b>',
+		'Поддерживается парсинг, импорт CSV/JSON, поиск и сегменты.',
 	]
-	for item in USER_REPO.list(limit=5):
+	for item in AUDIENCE_REPO.list(limit=5):
 		lines.append(
 			f'• ID <code>{item.get("id")}</code> | tg=<code>{item.get("telegram_user_id")}</code> | '
-			f'@{item.get("username") or "-"} | {item.get("first_name") or "-"}'
+			f'@{item.get("username") or "-"} | {item.get("first_name") or "-"} | src={item.get("source_value") or "-"}'
 		)
 	return '\n'.join(lines)
 
@@ -322,25 +320,25 @@ def _join_requests_text(status='pending'):
 
 
 def _parsing_text():
-	try:
-		connection = get_main_connection()
-		cursor = connection.cursor()
-		cursor.execute('SELECT COUNT(*) FROM parsed_usernames')
-		parsed_users = int((cursor.fetchone() or [0])[0] or 0)
-		cursor.execute('SELECT COUNT(*) FROM parsed_comments')
-		parsed_comments = int((cursor.fetchone() or [0])[0] or 0)
-		connection.close()
-	except Exception:
-		parsed_users = 0
-		parsed_comments = 0
-	return (
-		'📡 <b>Парсинг аудитории</b>\n'
-		'Модуль сбора аудитории сохранён в продукте и работает как источник для кампаний.\n\n'
-		f'В базе парсинга: usernames=<b>{parsed_users}</b>, comments=<b>{parsed_comments}</b>\n'
+	parse_summary = PARSE_TASK_REPO.summary()
+	recent_tasks = PARSE_TASK_REPO.list(limit=5)
+	lines = [
+		'📡 <b>Парсинг аудитории</b>',
+		'Модуль парсинга работает как источник для сегментов и кампаний.',
+		'',
+		f'Задач: <b>{parse_summary.get("total", 0)}</b> | running=<b>{parse_summary.get("running", 0)}</b> | failed=<b>{parse_summary.get("failed", 0)}</b>',
+		f'Найдено: <b>{parse_summary.get("total_found", 0)}</b> | сохранено: <b>{parse_summary.get("total_saved", 0)}</b> | skipped=<b>{parse_summary.get("total_skipped", 0)}</b>',
 		f'Текущие лимиты: posts={_setting_int("parser_posts_limit")}, comments={_setting_int("parser_comments_limit")}, '
-		f'all_sessions={"ВКЛ" if _setting_bool("parser_use_all_sessions") else "ВЫКЛ"}\n\n'
-		'Результат парсинга должен попадать в аудиторию для дальнейших кампаний.'
-	)
+		f'all_sessions={"ВКЛ" if _setting_bool("parser_use_all_sessions") else "ВЫКЛ"}',
+		'',
+		'Режимы: members / commenters / message_authors / import_file / manual_add',
+	]
+	for item in recent_tasks:
+		lines.append(
+			f'• #{item.get("id")} | mode={item.get("mode")} | status={item.get("status")} | '
+			f'saved={item.get("total_saved", 0)} / found={item.get("total_found", 0)}'
+		)
+	return '\n'.join(lines)
 
 
 def list_sessions():
@@ -943,6 +941,8 @@ def _flow_title(flow):
 		'community_add': 'Сообщество',
 		'audience_add': 'Аудитория',
 		'audience_import': 'Импорт аудитории',
+		'audience_search': 'Поиск аудитории',
+		'segment_create': 'Сегмент',
 		'campaign_create': 'Кампания',
 		'join_target': 'Вход в цель',
 		'settings': 'Настройки',
@@ -1013,13 +1013,22 @@ def _import_users_from_bytes(filename, data):
 		tags = row.get('tags') or []
 		if isinstance(tags, str):
 			tags = [part.strip() for part in tags.split(',') if part.strip()]
-		USER_REPO.upsert(
+		source_value = str(row.get('source') or '').strip() or str(filename or 'import').strip()
+		source = AUDIENCE_REPO.get_or_create_source(
+			source_type='file',
+			source_value=source_value,
+			title=source_value,
+			meta_json={'filename': filename},
+		)
+		AUDIENCE_REPO.upsert(
 			telegram_user_id=telegram_user_id,
 			username=str(row.get('username') or '').strip().lstrip('@'),
 			first_name=str(row.get('first_name') or '').strip(),
-			source=str(row.get('source') or '').strip(),
+			last_name=str(row.get('last_name') or '').strip(),
+			source_id=(source or {}).get('id'),
+			discovered_via='import_file',
 			consent_status=str(row.get('consent_status') or 'imported').strip(),
-			tags=tags,
+			tags_json=tags,
 			is_blacklisted=_parse_bool_value(row.get('is_blacklisted')),
 			unsubscribed_at=row.get('unsubscribed_at') or None,
 		)
@@ -1156,7 +1165,11 @@ def _build_audience_menu():
 	)
 	keyboard.add(
 		types.InlineKeyboardButton(text='📋 Список', callback_data='audience_list'),
+		types.InlineKeyboardButton(text='🔎 Поиск', callback_data='audience_search_start'),
+	)
+	keyboard.add(
 		types.InlineKeyboardButton(text='🚫 Blacklist', callback_data='audience_blacklist_list'),
+		types.InlineKeyboardButton(text='🧩 Сегменты', callback_data='segments_menu'),
 	)
 	keyboard.add(types.InlineKeyboardButton(text='⬅️ Назад', callback_data='main_menu'))
 	return keyboard
@@ -1165,7 +1178,15 @@ def _build_audience_menu():
 def _build_parser_menu():
 	keyboard = types.InlineKeyboardMarkup()
 	keyboard.add(
-		types.InlineKeyboardButton(text='▶️ Запустить', callback_data='parser_start'),
+		types.InlineKeyboardButton(text='👥 Members', callback_data='parser_mode|members'),
+		types.InlineKeyboardButton(text='💬 Commenters', callback_data='parser_mode|commenters'),
+	)
+	keyboard.add(
+		types.InlineKeyboardButton(text='✍️ Authors', callback_data='parser_mode|message_authors'),
+		types.InlineKeyboardButton(text='⬆️ Import File', callback_data='parser_mode|import_file'),
+	)
+	keyboard.add(
+		types.InlineKeyboardButton(text='➕ Manual Add', callback_data='parser_mode|manual_add'),
 		types.InlineKeyboardButton(text='📈 Статус', callback_data='task_status'),
 	)
 	keyboard.add(
@@ -1173,6 +1194,16 @@ def _build_parser_menu():
 		types.InlineKeyboardButton(text='👥 В аудиторию', callback_data='audience_menu'),
 	)
 	keyboard.add(types.InlineKeyboardButton(text='⬅️ Назад', callback_data='main_menu'))
+	return keyboard
+
+
+def _build_segments_menu():
+	keyboard = types.InlineKeyboardMarkup()
+	keyboard.add(
+		types.InlineKeyboardButton(text='➕ Создать сегмент', callback_data='segment_create_start'),
+		types.InlineKeyboardButton(text='📋 Список сегментов', callback_data='segments_list'),
+	)
+	keyboard.add(types.InlineKeyboardButton(text='⬅️ Назад', callback_data='audience_menu'))
 	return keyboard
 
 
@@ -1207,6 +1238,55 @@ def _parse_yes_no(value):
 	if text in ['нет', 'no', 'n', '0', 'false', 'off']:
 		return False
 	raise ValueError('Ожидается да/нет')
+
+
+def _parser_mode_title(mode):
+	return {
+		'members': 'Members',
+		'commenters': 'Commenters',
+		'message_authors': 'Message Authors',
+		'import_file': 'Import File',
+		'manual_add': 'Manual Add',
+	}.get(str(mode or '').strip(), str(mode or '-'))
+
+
+def _parse_segment_filter_text(text):
+	raw = str(text or '').strip()
+	if raw == '':
+		return {'exclude_unsubscribed': True}
+	if raw.lower() == 'all_active':
+		return {'exclude_unsubscribed': True, 'is_blacklisted': False}
+	result = {'exclude_unsubscribed': True}
+	for part in [item.strip() for item in raw.split(',') if item.strip()]:
+		lower = part.lower()
+		if lower == 'blacklisted':
+			result['is_blacklisted'] = True
+		elif lower == 'not_blacklisted':
+			result['is_blacklisted'] = False
+		elif lower == 'username_missing':
+			result['has_username'] = False
+		elif lower == 'username_exists':
+			result['has_username'] = True
+		elif lower.startswith('source='):
+			result['source_value'] = part.split('=', 1)[1].strip()
+		elif lower.startswith('tag='):
+			result['tag'] = part.split('=', 1)[1].strip()
+		elif lower.startswith('search='):
+			result['search'] = part.split('=', 1)[1].strip()
+	return result
+
+
+def _segment_detail_text(segment_id):
+	segment = SEGMENT_REPO.get(segment_id)
+	if not segment:
+		return 'Сегмент не найден.'
+	users = SEGMENT_REPO.get_users(segment_id, limit=1000)
+	return (
+		f'🧩 <b>{segment.get("name")}</b>\n'
+		f'ID: <code>{segment.get("id")}</code>\n'
+		f'Пользователей (preview ≤1000): <b>{len(users)}</b>\n'
+		f'Фильтр: <code>{json.dumps(segment.get("filter_json") or {}, ensure_ascii=False)}</code>'
+	)
 
 
 def _build_campaign_actions(campaign_id):
@@ -1245,7 +1325,7 @@ def _campaign_detail_text(campaign_id):
 
 
 def _build_user_actions(user_id):
-	user = USER_REPO.get(user_id)
+	user = AUDIENCE_REPO.get(user_id)
 	keyboard = types.InlineKeyboardMarkup()
 	keyboard.add(
 		types.InlineKeyboardButton(
@@ -1259,7 +1339,7 @@ def _build_user_actions(user_id):
 
 
 def _user_detail_text(user_id):
-	user = USER_REPO.get(user_id)
+	user = AUDIENCE_REPO.get(user_id)
 	if not user:
 		return 'Пользователь не найден.'
 	return (
@@ -1267,11 +1347,27 @@ def _user_detail_text(user_id):
 		f'ID: <code>{user.get("id")}</code>\n'
 		f'Telegram ID: <code>{user.get("telegram_user_id")}</code>\n'
 		f'Username: <code>@{user.get("username") or "-"}</code>\n'
-		f'Source: <code>{user.get("source") or "-"}</code>\n'
+		f'Source: <code>{user.get("source_value") or "-"}</code>\n'
+		f'Discovered via: <code>{user.get("discovered_via") or "-"}</code>\n'
 		f'Consent: <b>{user.get("consent_status") or "-"}</b>\n'
 		f'Blacklisted: <b>{_bool_title(user.get("is_blacklisted"))}</b>\n'
 		f'Unsubscribed: <b>{"Да" if user.get("unsubscribed_at") else "Нет"}</b>'
 	)
+
+
+def _segments_text():
+	items = SEGMENT_REPO.list(limit=20)
+	lines = [
+		'🧩 <b>Сегменты</b>',
+		f'Всего: <b>{len(items)}</b>',
+		'Фильтры сегментов сейчас строятся поверх аудитории: search/source/tag/blacklist/active.',
+	]
+	for item in items[:8]:
+		user_count = len(SEGMENT_REPO.get_users(item.get('id'), limit=500))
+		lines.append(
+			f'• <b>{item.get("name")}</b> | id=<code>{item.get("id")}</code> | preview≤500=<b>{user_count}</b>'
+		)
+	return '\n'.join(lines)
 
 
 def _build_manage_menu():
@@ -1302,18 +1398,7 @@ def _stats_text():
 	try:
 		campaigns = CAMPAIGN_REPO.list()
 		join_requests = JOIN_REQUEST_REPO.list(limit=5000)
-		parse_users = 0
-		parse_comments = 0
-		try:
-			connection = get_main_connection()
-			cursor = connection.cursor()
-			cursor.execute('SELECT COUNT(*) FROM parsed_usernames')
-			parse_users = int((cursor.fetchone() or [0])[0] or 0)
-			cursor.execute('SELECT COUNT(*) FROM parsed_comments')
-			parse_comments = int((cursor.fetchone() or [0])[0] or 0)
-			connection.close()
-		except Exception:
-			pass
+		parse_summary = PARSE_TASK_REPO.summary()
 		total_stats = {
 			'sent': 0,
 			'delivered': 0,
@@ -1332,11 +1417,13 @@ def _stats_text():
 		for row in join_requests:
 			status = str(row.get('status') or 'pending')
 			jr_status[status] = jr_status.get(status, 0) + 1
-		audience = USER_REPO.summary()
+		audience = AUDIENCE_REPO.summary()
 		return (
 			f'📊 <b>Аналитика платформы</b>\n'
 			f'Аккаунтов: <b>{len(list_sessions())}</b>\n'
-			f'Парсинг: usernames=<b>{parse_users}</b>, comments=<b>{parse_comments}</b>\n'
+			f'Парсинг: tasks=<b>{parse_summary.get("total", 0)}</b>, running=<b>{parse_summary.get("running", 0)}</b>, '
+			f'found=<b>{parse_summary.get("total_found", 0)}</b>, saved=<b>{parse_summary.get("total_saved", 0)}</b>, '
+			f'errors=<b>{parse_summary.get("total_errors", 0)}</b>\n'
 			f'Сообществ: <b>{len(COMMUNITY_REPO.list())}</b>\n'
 			f'Пользователей: <b>{audience.get("total", 0)}</b>\n'
 			f'Кампаний: <b>{len(campaigns)}</b>\n'
@@ -1758,13 +1845,21 @@ def audience_add_step_source(message):
 		USER_STATE.pop(message.chat.id, None)
 		bot.send_message(message.chat.id, '❌ Добавление пользователя отменено.', reply_markup=build_new_menu())
 		return
-	user = USER_REPO.upsert(
+	source_value = str(message.text or '').strip() or 'manual'
+	source = AUDIENCE_REPO.get_or_create_source(
+		source_type='manual',
+		source_value=source_value,
+		title=source_value,
+		meta_json={'added_by': message.chat.id},
+	)
+	user = AUDIENCE_REPO.upsert(
 		telegram_user_id=state['telegram_user_id'],
 		username=state.get('username', ''),
 		first_name=state.get('first_name', ''),
-		source=str(message.text or '').strip() or 'manual',
+		source_id=(source or {}).get('id'),
+		discovered_via='manual_add',
 		consent_status='manual',
-		tags=[],
+		tags_json=[],
 	)
 	USER_STATE.pop(message.chat.id, None)
 	_render_inline(
@@ -1776,6 +1871,80 @@ def audience_add_step_source(message):
 		f'Username: <code>@{user.get("username") or "-"}</code>',
 		reply_markup=_build_audience_menu(),
 		parse_mode='HTML'
+	)
+
+
+def audience_search_step_query(message):
+	if not _is_admin(message.chat.id):
+		_deny_access(message.chat.id)
+		return
+	state = USER_STATE.get(message.chat.id, {})
+	if state.get('flow') != 'audience_search':
+		return
+	if _is_cancel(message.text):
+		USER_STATE.pop(message.chat.id, None)
+		bot.send_message(message.chat.id, '❌ Поиск отменён.', reply_markup=build_new_menu())
+		return
+	query = str(message.text or '').strip()
+	results = AUDIENCE_REPO.search(query, limit=15)
+	USER_STATE.pop(message.chat.id, None)
+	keyboard = types.InlineKeyboardMarkup()
+	for user in results:
+		label = f'👤 @{user.get("username") or user.get("telegram_user_id")} ({user.get("id")})'
+		keyboard.add(types.InlineKeyboardButton(text=label[:60], callback_data=f'audience_user|{user.get("id")}'))
+	keyboard.add(types.InlineKeyboardButton(text='⬅️ Назад', callback_data='audience_menu'))
+	text = f'🔎 <b>Поиск аудитории</b>\nЗапрос: <code>{query}</code>\nНайдено: <b>{len(results)}</b>'
+	_render_inline(message.chat.id, state.get('panel_msg_id'), text, parse_mode='HTML', reply_markup=keyboard)
+
+
+def segment_create_step_name(message):
+	if not _is_admin(message.chat.id):
+		_deny_access(message.chat.id)
+		return
+	state = USER_STATE.get(message.chat.id, {})
+	if state.get('flow') != 'segment_create':
+		return
+	if _is_cancel(message.text):
+		USER_STATE.pop(message.chat.id, None)
+		bot.send_message(message.chat.id, '❌ Создание сегмента отменено.', reply_markup=build_new_menu())
+		return
+	state['name'] = str(message.text or '').strip()
+	state['stage'] = 'filters'
+	_prompt_step(
+		message.chat.id,
+		state,
+		'🧩 <b>Сегмент • Шаг 2/2</b>\n'
+		'Введи фильтр.\n\n'
+		'Примеры:\n'
+		'<code>all_active</code>\n'
+		'<code>source=@chatname</code>\n'
+		'<code>tag=vip</code>\n'
+		'<code>source=@chatname,tag=vip</code>\n'
+		'<code>search=john,username_exists</code>',
+		segment_create_step_filters
+	)
+
+
+def segment_create_step_filters(message):
+	if not _is_admin(message.chat.id):
+		_deny_access(message.chat.id)
+		return
+	state = USER_STATE.get(message.chat.id, {})
+	if state.get('flow') != 'segment_create':
+		return
+	if _is_cancel(message.text):
+		USER_STATE.pop(message.chat.id, None)
+		bot.send_message(message.chat.id, '❌ Создание сегмента отменено.', reply_markup=build_new_menu())
+		return
+	filter_json = _parse_segment_filter_text(message.text)
+	segment = SEGMENT_REPO.create(state.get('name') or 'Segment', filter_json=filter_json, created_by=message.chat.id)
+	USER_STATE.pop(message.chat.id, None)
+	_render_inline(
+		message.chat.id,
+		state.get('panel_msg_id'),
+		'✅ <b>Сегмент создан</b>\n\n' + _segment_detail_text(segment.get('id')),
+		parse_mode='HTML',
+		reply_markup=_build_segments_menu()
 	)
 
 
@@ -1903,30 +2072,128 @@ def campaign_create_step_message(message):
 	)
 
 
+def _queue_parser_job(message, state):
+	file_name, sources_count = _save_targets_file(message.chat.id, state.get('sources', ''), 'parser_sources')
+	if sources_count == 0:
+		bot.send_message(message.chat.id, '⚠️ Не нашёл источники. Запусти парсинг заново.', reply_markup=build_new_menu())
+		return
+	parse_mode = state.get('parse_mode') or 'members'
+	task = PARSE_TASK_REPO.create(
+		mode=parse_mode,
+		source_type='chat',
+		source_value=str(state.get('sources') or '').strip(),
+		status='queued',
+		created_by=message.chat.id,
+	)
+	command = [
+		sys.executable, os.path.join('workers', 'parser_worker.py'),
+		'--mode', parse_mode,
+		'--targets-file', file_name,
+		'--task-id', str(task.get('id')),
+	]
+	if parse_mode == 'members':
+		command += ['--members-limit', str(int(state.get('members_limit') or _setting_int('parser_posts_limit')))]
+	elif parse_mode == 'commenters':
+		command += [
+			'--posts-limit', str(int(state.get('posts_limit') or _setting_int('parser_posts_limit'))),
+			'--comments-limit', str(int(state.get('comments_limit') or _setting_int('parser_comments_limit'))),
+		]
+	elif parse_mode == 'message_authors':
+		command += ['--messages-limit', str(int(state.get('messages_limit') or _setting_int('parser_posts_limit')))]
+	if _setting_bool('parser_use_all_sessions'):
+		command.append('--use-all-sessions')
+	progress_file = _progress_file(message.chat.id, 'parser')
+	command += ['--progress-file', progress_file]
+	queue_pos = _enqueue_process(
+		message.chat.id,
+		f'parser {parse_mode} ({sources_count} sources)',
+		command,
+		progress_file=progress_file
+	)
+	USER_STATE.pop(message.chat.id, None)
+	_render_inline(
+		message.chat.id,
+		state.get('panel_msg_id'),
+		f'✅ <b>Парсинг поставлен в очередь</b>\n'
+		f'• Task ID: <b>{task.get("id")}</b>\n'
+		f'• Mode: <b>{_parser_mode_title(parse_mode)}</b>\n'
+		f'• Источников: <b>{sources_count}</b>\n'
+		f'• Позиция: <b>~{queue_pos}</b>\n'
+		'Как только задача стартует — прогресс пойдёт в <code>parse_tasks</code> и live-status.',
+		parse_mode='HTML',
+		reply_markup=build_new_menu()
+	)
+
+
 def parser_step_sources(message):
 	if not _is_admin(message.chat.id):
 		_deny_access(message.chat.id)
 		return
 	state = USER_STATE.get(message.chat.id, {})
 	if state.get('flow') != 'parser':
-		bot.send_message(message.chat.id, '⚠️ Сейчас неактивен сценарий парсинга. Нажми кнопку «Парсинг • Аудитория» заново.', reply_markup=build_new_menu())
+		bot.send_message(message.chat.id, '⚠️ Сейчас неактивен сценарий парсинга. Открой раздел «📡 Парсинг» заново.', reply_markup=build_new_menu())
 		return
 	if _is_cancel(message.text):
 		USER_STATE.pop(message.chat.id, None)
 		bot.send_message(message.chat.id, '❌ Действие отменено.', reply_markup=build_new_menu())
 		return
 	state['sources'] = message.text
+	parse_mode = state.get('parse_mode') or 'members'
+	if parse_mode == 'members':
+		state['stage'] = 'members_limit'
+		USER_STATE[message.chat.id] = state
+		_prompt_step(
+			message.chat.id,
+			state,
+			f'🔎 <b>Парсинг • Шаг 2/2</b>\n'
+			f'Режим: <b>{_parser_mode_title(parse_mode)}</b>\n'
+			f'Укажи лимит участников на источник.\n'
+			f'Рекомендация: <b>{_setting_int("parser_posts_limit")}</b>.',
+			parser_step_members_limit
+		)
+		return
+	if parse_mode == 'message_authors':
+		state['stage'] = 'messages_limit'
+		USER_STATE[message.chat.id] = state
+		_prompt_step(
+			message.chat.id,
+			state,
+			f'🔎 <b>Парсинг • Шаг 2/2</b>\n'
+			f'Режим: <b>{_parser_mode_title(parse_mode)}</b>\n'
+			f'Укажи лимит сообщений на источник.\n'
+			f'Рекомендация: <b>{_setting_int("parser_posts_limit")}</b>.',
+			parser_step_messages_limit
+		)
+		return
 	state['stage'] = 'posts'
 	USER_STATE[message.chat.id] = state
-	default_posts = _setting_int('parser_posts_limit')
 	_prompt_step(
 		message.chat.id,
 		state,
 		f'🔎 <b>Парсинг • Шаг 2/3</b>\n'
+		f'Режим: <b>{_parser_mode_title(parse_mode)}</b>\n'
 		f'Выбери глубину анализа по постам.\n'
-		f'Рекомендация: <b>{default_posts}</b>.',
+		f'Рекомендация: <b>{_setting_int("parser_posts_limit")}</b>.',
 		parser_step_posts
 	)
+
+
+def parser_step_members_limit(message):
+	if not _is_admin(message.chat.id):
+		_deny_access(message.chat.id)
+		return
+	state = USER_STATE.get(message.chat.id, {})
+	if state.get('flow') != 'parser':
+		return
+	if _is_cancel(message.text):
+		USER_STATE.pop(message.chat.id, None)
+		bot.send_message(message.chat.id, '❌ Действие отменено.', reply_markup=build_new_menu())
+		return
+	try:
+		state['members_limit'] = int(str(message.text).strip())
+	except (TypeError, ValueError):
+		state['members_limit'] = _setting_int('parser_posts_limit')
+	_queue_parser_job(message, state)
 
 
 def parser_step_posts(message):
@@ -1935,7 +2202,7 @@ def parser_step_posts(message):
 		return
 	state = USER_STATE.get(message.chat.id, {})
 	if state.get('flow') != 'parser':
-		bot.send_message(message.chat.id, '⚠️ Сейчас неактивен сценарий парсинга. Нажми кнопку «Парсинг • Аудитория» заново.', reply_markup=build_new_menu())
+		bot.send_message(message.chat.id, '⚠️ Сейчас неактивен сценарий парсинга. Открой раздел «📡 Парсинг» заново.', reply_markup=build_new_menu())
 		return
 	if _is_cancel(message.text):
 		USER_STATE.pop(message.chat.id, None)
@@ -1963,42 +2230,35 @@ def parser_step_comments(message):
 		return
 	state = USER_STATE.get(message.chat.id, {})
 	if state.get('flow') != 'parser':
-		bot.send_message(message.chat.id, '⚠️ Сейчас неактивен сценарий парсинга. Нажми кнопку «Парсинг • Аудитория» заново.', reply_markup=build_new_menu())
+		bot.send_message(message.chat.id, '⚠️ Сейчас неактивен сценарий парсинга. Открой раздел «📡 Парсинг» заново.', reply_markup=build_new_menu())
 		return
 	if _is_cancel(message.text):
 		USER_STATE.pop(message.chat.id, None)
 		bot.send_message(message.chat.id, '❌ Действие отменено.', reply_markup=build_new_menu())
 		return
 	try:
-		comments_limit = int(message.text.strip())
+		state['comments_limit'] = int(message.text.strip())
 	except (TypeError, ValueError):
-		comments_limit = _setting_int('parser_comments_limit')
-	file_name, sources_count = _save_targets_file(message.chat.id, state.get('sources', ''), 'parser_sources')
-	if sources_count == 0:
-		bot.send_message(message.chat.id, '⚠️ Не нашёл источники. Запусти парсинг заново.', reply_markup=build_new_menu())
+		state['comments_limit'] = _setting_int('parser_comments_limit')
+	_queue_parser_job(message, state)
+
+
+def parser_step_messages_limit(message):
+	if not _is_admin(message.chat.id):
+		_deny_access(message.chat.id)
 		return
-	command = [
-		sys.executable, os.path.join('workers', 'parser_worker.py'),
-		'--targets-file', file_name,
-		'--posts-limit', str(state.get('posts_limit', 100)),
-		'--comments-limit', str(comments_limit)
-	]
-	if _setting_bool('parser_use_all_sessions'):
-		command.append('--use-all-sessions')
-	progress_file = _progress_file(message.chat.id, 'parser')
-	command += ['--progress-file', progress_file]
-	queue_pos = _enqueue_process(message.chat.id, f'parser ({sources_count} sources)', command, progress_file=progress_file)
-	USER_STATE.pop(message.chat.id, None)
-	_render_inline(
-		message.chat.id,
-		state.get('panel_msg_id'),
-		f'✅ <b>Парсинг поставлен в очередь</b>\n'
-		f'• Источников: <b>{sources_count}</b>\n'
-		f'• Позиция: <b>~{queue_pos}</b>\n'
-		'Как только задача стартует — покажу живой прогресс.',
-		parse_mode='HTML',
-		reply_markup=build_new_menu()
-	)
+	state = USER_STATE.get(message.chat.id, {})
+	if state.get('flow') != 'parser':
+		return
+	if _is_cancel(message.text):
+		USER_STATE.pop(message.chat.id, None)
+		bot.send_message(message.chat.id, '❌ Действие отменено.', reply_markup=build_new_menu())
+		return
+	try:
+		state['messages_limit'] = int(str(message.text).strip())
+	except (TypeError, ValueError):
+		state['messages_limit'] = _setting_int('parser_posts_limit')
+	_queue_parser_job(message, state)
 
 
 def join_target_step_target(message):
@@ -2269,14 +2529,14 @@ def podcategors(call):
 			call.message.message_id,
 			'⬆️ <b>Импорт аудитории</b>\nОтправь файл <code>.csv</code> или <code>.json</code> документом.\n\n'
 			'Поддерживаемые поля:\n'
-			'<code>telegram_user_id,username,first_name,source,consent_status,tags,is_blacklisted,unsubscribed_at</code>',
+			'<code>telegram_user_id,username,first_name,last_name,source,consent_status,tags,is_blacklisted,unsubscribed_at</code>',
 			parse_mode='HTML',
 			reply_markup=_step_keyboard()
 		)
 		return
 
 	if call.data == 'audience_list':
-		users = USER_REPO.list(limit=12)
+		users = AUDIENCE_REPO.list(limit=12)
 		keyboard = types.InlineKeyboardMarkup()
 		for user in users:
 			label = f'👤 @{user.get("username") or user.get("telegram_user_id")} ({user.get("id")})'
@@ -2285,8 +2545,29 @@ def podcategors(call):
 		_render_inline(call.message.chat.id, call.message.message_id, _audience_text(), parse_mode='HTML', reply_markup=keyboard)
 		return
 
+	if call.data == 'audience_search_start':
+		if _has_active_flow(call.message.chat.id):
+			cur = USER_STATE.get(call.message.chat.id, {}).get('flow')
+			_render_inline(
+				call.message.chat.id,
+				call.message.message_id,
+				f'⚠️ Уже активен сценарий: <b>{_flow_title(cur)}</b>.\nЧтобы начать новый, сначала отмени текущий.',
+				parse_mode='HTML',
+				reply_markup=_step_keyboard()
+			)
+			return
+		state = {'flow': 'audience_search', 'stage': 'query', 'panel_msg_id': call.message.message_id}
+		USER_STATE[call.message.chat.id] = state
+		_prompt_step(
+			call.message.chat.id,
+			state,
+			'🔎 <b>Поиск аудитории</b>\nВведи username, first_name или Telegram user id.',
+			audience_search_step_query
+		)
+		return
+
 	if call.data == 'audience_blacklist_list':
-		users = USER_REPO.list(limit=12)
+		users = AUDIENCE_REPO.list(limit=12)
 		keyboard = types.InlineKeyboardMarkup()
 		for user in users:
 			marker = '✅' if user.get('is_blacklisted') else '🚫'
@@ -2307,18 +2588,61 @@ def podcategors(call):
 
 	if call.data.startswith('audience_toggle_blacklist|'):
 		user_id = int(call.data.split('|', 1)[1])
-		user = USER_REPO.get(user_id)
+		user = AUDIENCE_REPO.get(user_id)
 		if not user:
 			bot.send_message(call.message.chat.id, 'Пользователь не найден.')
 			return
-		USER_REPO.blacklist(user_id, is_blacklisted=not bool(user.get('is_blacklisted')))
+		AUDIENCE_REPO.blacklist(user_id, is_blacklisted=not bool(user.get('is_blacklisted')))
 		_render_inline(call.message.chat.id, call.message.message_id, _user_detail_text(user_id), parse_mode='HTML', reply_markup=_build_user_actions(user_id))
 		return
 
 	if call.data.startswith('audience_unsubscribe|'):
 		user_id = int(call.data.split('|', 1)[1])
-		USER_REPO.unsubscribe(user_id)
+		AUDIENCE_REPO.unsubscribe(user_id)
 		_render_inline(call.message.chat.id, call.message.message_id, _user_detail_text(user_id), parse_mode='HTML', reply_markup=_build_user_actions(user_id))
+		return
+
+	if call.data == 'segments_menu':
+		_render_inline(call.message.chat.id, call.message.message_id, _segments_text(), parse_mode='HTML', reply_markup=_build_segments_menu())
+		return
+
+	if call.data == 'segments_list':
+		keyboard = types.InlineKeyboardMarkup()
+		for item in SEGMENT_REPO.list(limit=12):
+			keyboard.add(
+				types.InlineKeyboardButton(
+					text=f'🧩 {item.get("name")} ({item.get("id")})'[:60],
+					callback_data=f'segment_view|{item.get("id")}'
+				)
+			)
+		keyboard.add(types.InlineKeyboardButton(text='⬅️ Назад', callback_data='segments_menu'))
+		_render_inline(call.message.chat.id, call.message.message_id, _segments_text(), parse_mode='HTML', reply_markup=keyboard)
+		return
+
+	if call.data == 'segment_create_start':
+		if _has_active_flow(call.message.chat.id):
+			cur = USER_STATE.get(call.message.chat.id, {}).get('flow')
+			_render_inline(
+				call.message.chat.id,
+				call.message.message_id,
+				f'⚠️ Уже активен сценарий: <b>{_flow_title(cur)}</b>.\nЧтобы начать новый, сначала отмени текущий.',
+				parse_mode='HTML',
+				reply_markup=_step_keyboard()
+			)
+			return
+		state = {'flow': 'segment_create', 'stage': 'name', 'panel_msg_id': call.message.message_id}
+		USER_STATE[call.message.chat.id] = state
+		_prompt_step(
+			call.message.chat.id,
+			state,
+			'🧩 <b>Сегмент • Шаг 1/2</b>\nВведи название сегмента.',
+			segment_create_step_name
+		)
+		return
+
+	if call.data.startswith('segment_view|'):
+		segment_id = int(call.data.split('|', 1)[1])
+		_render_inline(call.message.chat.id, call.message.message_id, _segment_detail_text(segment_id), parse_mode='HTML', reply_markup=_build_segments_menu())
 		return
 
 	if call.data == 'campaigns_menu':
@@ -2617,7 +2941,49 @@ def podcategors(call):
 		)
 		return
 
-	if call.data == 'parser_start':
+	if call.data.startswith('parser_mode|'):
+		parse_mode = call.data.split('|', 1)[1]
+		if parse_mode == 'import_file':
+			if _has_active_flow(call.message.chat.id):
+				cur = USER_STATE.get(call.message.chat.id, {}).get('flow')
+				_render_inline(
+					call.message.chat.id,
+					call.message.message_id,
+					f'⚠️ Уже активен сценарий: <b>{_flow_title(cur)}</b>.\nЧтобы начать новый, сначала отмени текущий.',
+					parse_mode='HTML',
+					reply_markup=_step_keyboard()
+				)
+				return
+			USER_STATE[call.message.chat.id] = {'flow': 'audience_import', 'panel_msg_id': call.message.message_id}
+			_render_inline(
+				call.message.chat.id,
+				call.message.message_id,
+				'⬆️ <b>Импорт аудитории</b>\nОтправь файл <code>.csv</code> или <code>.json</code> документом.\n\n'
+				'Данные попадут в <code>audience_users</code> и будут доступны для сегментов.',
+				parse_mode='HTML',
+				reply_markup=_step_keyboard()
+			)
+			return
+		if parse_mode == 'manual_add':
+			if _has_active_flow(call.message.chat.id):
+				cur = USER_STATE.get(call.message.chat.id, {}).get('flow')
+				_render_inline(
+					call.message.chat.id,
+					call.message.message_id,
+					f'⚠️ Уже активен сценарий: <b>{_flow_title(cur)}</b>.\nЧтобы начать новый, сначала отмени текущий.',
+					parse_mode='HTML',
+					reply_markup=_step_keyboard()
+				)
+				return
+			state = {'flow': 'audience_add', 'stage': 'telegram_user_id', 'panel_msg_id': call.message.message_id}
+			USER_STATE[call.message.chat.id] = state
+			_prompt_step(
+				call.message.chat.id,
+				state,
+				'👥 <b>Аудитория • Шаг 1/4</b>\nВведи числовой Telegram user id.',
+				audience_add_step_tg_id
+			)
+			return
 		if _has_active_flow(call.message.chat.id):
 			cur = USER_STATE.get(call.message.chat.id, {}).get('flow')
 			_render_inline(
@@ -2631,19 +2997,22 @@ def podcategors(call):
 			return
 		if not _ensure_sessions_or_warn(call.message.chat.id, call.message.message_id):
 			return
-		state = {'flow': 'parser', 'stage': 'sources', 'panel_msg_id': call.message.message_id}
+		state = {'flow': 'parser', 'stage': 'sources', 'panel_msg_id': call.message.message_id, 'parse_mode': parse_mode}
 		USER_STATE[call.message.chat.id] = state
+		mode_text = 'Шаг 1/2' if parse_mode in ['members', 'message_authors'] else 'Шаг 1/3'
 		_prompt_step(
 			call.message.chat.id,
 			state,
-			'🔎 <b>Парсинг аудитории</b>\n'
-			'Шаг 1/3: отправь источники (через запятую или с новой строки).\n\n'
-			'Пример:\n<code>@chat1\n@chat2</code>\n\n'
-			f'Текущие настройки: постов={_setting_int("parser_posts_limit")}, комментариев={_setting_int("parser_comments_limit")}, '
-			f'все аккаунты={"ВКЛ" if _setting_bool("parser_use_all_sessions") else "ВЫКЛ"}.\n'
-			'После этого я попрошу лимиты и поставлю задачу в очередь.',
+			f'🔎 <b>Парсинг аудитории</b>\n'
+			f'Режим: <b>{_parser_mode_title(parse_mode)}</b>\n'
+			f'{mode_text}: отправь источники (через запятую или с новой строки).\n\n'
+			'Пример:\n<code>@chat1\n@chat2</code>',
 			parser_step_sources
 		)
+		return
+
+	if call.data == 'parser_start':
+		_render_inline(call.message.chat.id, call.message.message_id, _parsing_text(), parse_mode='HTML', reply_markup=_build_parser_menu())
 		return
 
 	if call.data == 'inviter_start':
@@ -2679,6 +3048,21 @@ def podcategors(call):
 	if call.data == 'task_status':
 		items = RUNNING_TASKS.get(call.message.chat.id, [])
 		if len(items) == 0:
+			parse_summary = PARSE_TASK_REPO.summary()
+			if parse_summary.get('running', 0) or parse_summary.get('queued', 0):
+				recent = PARSE_TASK_REPO.list(limit=5)
+				lines = [
+					'📈 Статус задач',
+					f'Parse queued: {parse_summary.get("queued", 0)}',
+					f'Parse running: {parse_summary.get("running", 0)}',
+				]
+				for item in recent:
+					lines.append(
+						f'• parse #{item.get("id")} | {item.get("mode")} | {item.get("status")} | '
+						f'saved={item.get("total_saved", 0)}'
+					)
+				_render_inline(call.message.chat.id, call.message.message_id, '\n'.join(lines), reply_markup=build_new_menu(), parse_mode=None)
+				return
 			bot.send_message(call.message.chat.id, 'Сейчас активных задач нет ✅')
 			return
 		lines = []
