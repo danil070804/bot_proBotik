@@ -713,11 +713,43 @@ def _build_parse_tasks_list_keyboard(page=0):
 	return build_inline_keyboard(rows_spec)
 
 
+def _parse_task_sources_count(task):
+	task = task or {}
+	source_reports = task.get('source_report_json') or []
+	if source_reports:
+		return len(source_reports)
+	sources = str((task.get('meta_json') or {}).get('sources') or task.get('source_value') or '').strip()
+	return len([row for row in sources.splitlines() if str(row).strip()])
+
+
+def _parse_task_rollup(task):
+	task = task or {}
+	source_reports = task.get('source_report_json') or []
+	mode = str(task.get('mode') or '').strip()
+	rollup = {
+		'authors_saved': 0,
+		'commenters_saved': 0,
+		'unique_users': 0,
+		'duplicates': 0,
+	}
+	if mode != 'engaged_users':
+		return rollup
+	unique_total = 0
+	for row in source_reports:
+		rollup['authors_saved'] += int(row.get('authors_saved') or 0)
+		rollup['commenters_saved'] += int(row.get('commenters_saved') or 0)
+		unique_total += int(row.get('unique_users') or row.get('saved') or 0)
+	rollup['unique_users'] = unique_total
+	rollup['duplicates'] = max(0, rollup['authors_saved'] + rollup['commenters_saved'] - unique_total)
+	return rollup
+
+
 def _parse_task_detail_text(task_id):
 	task = PARSE_TASK_REPO.get(task_id)
 	if not task:
 		return 'Задача парсинга не найдена.'
 	source_reports = task.get('source_report_json') or []
+	rollup = _parse_task_rollup(task)
 	highlights = []
 	for row in source_reports[:3]:
 		status = row.get('status') or row.get('error_code') or '—'
@@ -733,10 +765,12 @@ def _parse_task_detail_text(task_id):
 		stats=[
 			('ID', task.get('id')),
 			('Режим', _parser_mode_title(task.get('mode'))),
-			('Источники', len(source_reports) or len(str(task.get('source_value') or '').splitlines())),
+			('Источники', _parse_task_sources_count(task)),
 			('Статус', f'{_parse_task_status_emoji(task.get("status"))} {task.get("status") or "draft"}'),
 			('Сохранено', task.get('total_saved', 0)),
 			('Ошибки', task.get('total_errors', 0)),
+			('Уникальные', rollup.get('unique_users', 0) if task.get('mode') == 'engaged_users' else task.get('total_saved', 0)),
+			('Дубликаты', rollup.get('duplicates', 0) if task.get('mode') == 'engaged_users' else task.get('total_skipped', 0)),
 			('Запуск', _compact_dt(task.get('started_at') or task.get('created_at'))),
 		],
 		highlights=[] if _is_compact_mode() else highlights,
@@ -757,12 +791,19 @@ def _parse_task_sources_text(task_id):
 	lines.append('')
 	for idx, row in enumerate(source_reports[:20], start=1):
 		status = row.get('status') or row.get('error_code') or '—'
-		lines.append(
-			f'{idx}. <b>{row.get("source_title") or row.get("source")}</b> — '
-			f'<code>{status}</code>, <b>{_format_parse_source_metrics(row)}</b>'
-		)
+		lines.append(f'{idx}. <b>{row.get("source_title") or row.get("source")}</b>')
+		lines.append(f'Статус: <code>{status}</code>')
+		if task.get('mode') == 'engaged_users':
+			lines.append(f'Авторы: <b>{int(row.get("authors_saved") or 0)}</b>')
+			lines.append(f'Комментаторы: <b>{int(row.get("commenters_saved") or 0)}</b>')
+			lines.append(f'Уникальных: <b>{int(row.get("unique_users") or row.get("saved") or 0)}</b>')
+			lines.append(f'Дубликатов: <b>{int(row.get("duplicates") or 0)}</b>')
+		else:
+			lines.append(f'Пользователи: <b>{int(row.get("saved") or 0)}</b>')
+			lines.append(f'Комментарии: <b>{int(row.get("comments") or 0)}</b>')
 		if row.get('error_text'):
 			lines.append(f'   {str(row.get("error_text"))[:140]}')
+		lines.append('')
 	return '\n'.join(lines)
 
 
@@ -1110,8 +1151,13 @@ def _format_parse_source_metrics(row):
 	comments = int(row.get('comments') or 0)
 	commenters_saved = int(row.get('commenters_saved') or 0)
 	authors_saved = int(row.get('authors_saved') or 0)
-	if 'commenters_saved' in row or 'authors_saved' in row:
-		return f'users {saved}, commenters {commenters_saved}, authors {authors_saved}'
+	unique_users = int(row.get('unique_users') or 0)
+	duplicates = int(row.get('duplicates') or 0)
+	if 'unique_users' in row or 'commenters_saved' in row or 'authors_saved' in row:
+		return (
+			f'authors {authors_saved}, commenters {commenters_saved}, '
+			f'unique {unique_users or saved}, duplicates {duplicates}'
+		)
 	return f'users {saved}, comments {comments}'
 
 
@@ -1119,9 +1165,10 @@ def _format_parse_totals(progress):
 	progress = progress or {}
 	if str(progress.get('parser_mode') or '') == 'engaged_users':
 		return (
-			f'Пользователей: {progress.get("users_parsed", 0)}\n'
+			f'Авторы сообщений: {progress.get("authors_saved", 0)}\n'
 			f'Комментаторы: {progress.get("commenters_saved", 0)}\n'
-			f'Авторы: {progress.get("authors_saved", 0)}'
+			f'Уникальных пользователей: {progress.get("unique_users", progress.get("users_parsed", 0))}\n'
+			f'Дубликатов: {progress.get("duplicates", 0)}'
 		)
 	return (
 		f'Пользователей: {progress.get("users_parsed", 0)}\n'
@@ -1256,6 +1303,7 @@ def _queue_worker():
 					text = (
 						f'✅ Завершено: {item["title"]}\n'
 						f'Код: {code}\n'
+						f'Режим: {_parser_mode_title(progress.get("parser_mode"))}\n'
 						f'Источники: {progress.get("sources_done", 0)}/{progress.get("sources_total", 0)}\n'
 						f'Успешно: {max(0, progress.get("sources_done", 0) - progress.get("sources_failed", 0))}\n'
 						f'С ошибками: {progress.get("sources_failed", 0)}\n'

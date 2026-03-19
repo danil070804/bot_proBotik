@@ -72,6 +72,18 @@ def normalize_user(user):
     }
 
 
+def _user_identity_key(user=None, fallback_id=None):
+    telegram_user_id = getattr(user, 'id', None) if user else None
+    if telegram_user_id:
+        return f'id:{int(telegram_user_id)}'
+    if fallback_id:
+        return f'id:{int(fallback_id)}'
+    username = (getattr(user, 'username', '') or '').strip().lstrip('@').lower() if user else ''
+    if username:
+        return f'un:{username}'
+    return None
+
+
 def resolve_source(target, source_type='chat', title=None, meta_json=None):
     return AUDIENCE_REPO.get_or_create_source(
         source_type=source_type,
@@ -134,7 +146,8 @@ async def parse_members(client, target_entity, target_label, members_limit=None,
 
 
 async def parse_comments(client, target_entity, target_label, posts_limit, comments_limit, parse_task_id=None, source_id=None):
-    stats = {'found': 0, 'saved': 0, 'skipped': 0, 'legacy_saved': 0}
+    stats = {'found': 0, 'saved': 0, 'skipped': 0, 'legacy_saved': 0, 'unique_users': 0, '_keys': set()}
+    seen = set()
     try:
         async for post in client.iter_messages(target_entity, limit=posts_limit):
             if not post:
@@ -143,16 +156,19 @@ async def parse_comments(client, target_entity, target_label, posts_limit, comme
                 async for comment in client.iter_messages(target_entity, reply_to=post.id, limit=comments_limit):
                     if comment and comment.sender_id:
                         sender = await comment.get_sender()
-                        result = save_parsed_audience_user(
-                            sender,
-                            target_label,
-                            'commenters',
-                            parse_task_id=parse_task_id,
-                            source_id=source_id,
-                        )
-                        stats['found'] += result['found']
-                        stats['saved'] += result['saved']
-                        stats['skipped'] += result['skipped']
+                        key = _user_identity_key(sender, fallback_id=comment.sender_id)
+                        if key and key not in seen:
+                            seen.add(key)
+                            result = save_parsed_audience_user(
+                                sender,
+                                target_label,
+                                'commenters',
+                                parse_task_id=parse_task_id,
+                                source_id=source_id,
+                            )
+                            stats['found'] += result['found']
+                            stats['saved'] += result['saved']
+                            stats['skipped'] += result['skipped']
                         if sender and getattr(sender, 'username', None):
                             save_parsed_comment(
                                 target=target_label,
@@ -168,11 +184,14 @@ async def parse_comments(client, target_entity, target_label, posts_limit, comme
                 continue
     except Exception as e:
         logger.warning(f'Не удалось собрать посты/комментарии {target_label}: {e}')
+    stats['unique_users'] = len(seen)
+    stats['_keys'] = seen
     return stats
 
 
 async def parse_message_authors(client, target_entity, target_label, messages_limit, parse_task_id=None, source_id=None):
-    stats = {'found': 0, 'saved': 0, 'skipped': 0, 'legacy_saved': 0}
+    stats = {'found': 0, 'saved': 0, 'skipped': 0, 'legacy_saved': 0, 'unique_users': 0, '_keys': set()}
+    seen = set()
     try:
         async for item in client.iter_messages(target_entity, limit=messages_limit):
             if not item or not getattr(item, 'sender_id', None):
@@ -181,20 +200,25 @@ async def parse_message_authors(client, target_entity, target_label, messages_li
                 sender = await item.get_sender()
             except Exception:
                 sender = None
-            result = save_parsed_audience_user(
-                sender,
-                target_label,
-                'message_authors',
-                parse_task_id=parse_task_id,
-                source_id=source_id,
-            )
-            stats['found'] += result['found']
-            stats['saved'] += result['saved']
-            stats['skipped'] += result['skipped']
+            key = _user_identity_key(sender, fallback_id=getattr(item, 'sender_id', None))
+            if key and key not in seen:
+                seen.add(key)
+                result = save_parsed_audience_user(
+                    sender,
+                    target_label,
+                    'message_authors',
+                    parse_task_id=parse_task_id,
+                    source_id=source_id,
+                )
+                stats['found'] += result['found']
+                stats['saved'] += result['saved']
+                stats['skipped'] += result['skipped']
     except FloodWaitError as e:
         await asyncio.sleep(int(e.seconds))
     except Exception as e:
         logger.warning(f'Не удалось собрать авторов сообщений {target_label}: {e}')
+    stats['unique_users'] = len(seen)
+    stats['_keys'] = seen
     return stats
 
 
@@ -217,6 +241,9 @@ async def parse_engaged_users(client, target_entity, target_label, posts_limit, 
         'authors_found': 0,
         'authors_saved': 0,
         'authors_skipped': 0,
+        'unique_users': 0,
+        'duplicates': 0,
+        '_unique_keys': set(),
     }
     comment_stats = await parse_comments(
         client,
@@ -228,8 +255,9 @@ async def parse_engaged_users(client, target_entity, target_label, posts_limit, 
         source_id=source_id,
     )
     _merge_parse_stats(stats, comment_stats)
-    stats['commenters_found'] = int(comment_stats.get('found') or 0)
-    stats['commenters_saved'] = int(comment_stats.get('saved') or 0)
+    comment_keys = set(comment_stats.get('_keys') or set())
+    stats['commenters_found'] = int(comment_stats.get('unique_users') or len(comment_keys))
+    stats['commenters_saved'] = int(comment_stats.get('unique_users') or len(comment_keys))
     stats['commenters_skipped'] = int(comment_stats.get('skipped') or 0)
     stats['comments_count'] = int(comment_stats.get('legacy_saved') or 0)
 
@@ -242,9 +270,14 @@ async def parse_engaged_users(client, target_entity, target_label, posts_limit, 
         source_id=source_id,
     )
     _merge_parse_stats(stats, author_stats)
-    stats['authors_found'] = int(author_stats.get('found') or 0)
-    stats['authors_saved'] = int(author_stats.get('saved') or 0)
+    author_keys = set(author_stats.get('_keys') or set())
+    stats['authors_found'] = int(author_stats.get('unique_users') or len(author_keys))
+    stats['authors_saved'] = int(author_stats.get('unique_users') or len(author_keys))
     stats['authors_skipped'] = int(author_stats.get('skipped') or 0)
+    unique_keys = comment_keys | author_keys
+    stats['unique_users'] = len(unique_keys)
+    stats['duplicates'] = max(0, stats['commenters_saved'] + stats['authors_saved'] - stats['unique_users'])
+    stats['_unique_keys'] = unique_keys
     return stats
 
 
@@ -385,6 +418,8 @@ async def run_parser(
         'total_skipped': 0,
         'commenters_saved': 0,
         'authors_saved': 0,
+        'unique_users': 0,
+        'duplicates': 0,
         'errors': 0,
         'current_source': '',
         'active_session': '',
@@ -402,6 +437,7 @@ async def run_parser(
     total_legacy_saved = 0
     total_commenters_saved = 0
     total_authors_saved = 0
+    total_unique_keys = set()
     source_results = []
     for idx, parsed_target in enumerate(targets):
         source_label = parsed_target.display_value
@@ -441,6 +477,7 @@ async def run_parser(
             total_legacy_saved += int(stats.get('legacy_saved') or 0)
             total_commenters_saved += int(stats.get('commenters_saved') or 0)
             total_authors_saved += int(stats.get('authors_saved') or 0)
+            total_unique_keys |= set(stats.get('_unique_keys') or set())
             source_result.update(
                 {
                     'status': 'success',
@@ -450,6 +487,8 @@ async def run_parser(
                     'comments': int(stats.get('legacy_saved') or 0),
                     'commenters_saved': int(stats.get('commenters_saved') or 0),
                     'authors_saved': int(stats.get('authors_saved') or 0),
+                    'unique_users': int(stats.get('unique_users') or 0),
+                    'duplicates': int(stats.get('duplicates') or 0),
                     'source_title': stats.get('source_title') or source_label,
                     'source_id': stats.get('source_id'),
                     'join_status': stats.get('join_status') or '',
@@ -478,6 +517,8 @@ async def run_parser(
         progress['total_skipped'] = total_skipped
         progress['commenters_saved'] = total_commenters_saved
         progress['authors_saved'] = total_authors_saved
+        progress['unique_users'] = len(total_unique_keys)
+        progress['duplicates'] = max(0, total_commenters_saved + total_authors_saved - len(total_unique_keys))
         source_results.append(source_result)
         progress['source_results'] = source_results[-8:]
         if task_id:

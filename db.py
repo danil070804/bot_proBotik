@@ -1944,6 +1944,7 @@ def get_audience_summary():
         'with_username': 0,
         'without_username': 0,
         'sources': 0,
+        'today_found': 0,
     }
     with get_connection() as conn:
         cursor = conn.cursor()
@@ -1962,6 +1963,11 @@ def get_audience_summary():
         summary['without_username'] = int((cursor.fetchone() or [0])[0] or 0)
         cursor.execute('SELECT COUNT(*) FROM audience_sources')
         summary['sources'] = int((cursor.fetchone() or [0])[0] or 0)
+        if IS_POSTGRES:
+            cursor.execute('SELECT COUNT(*) FROM audience_users WHERE discovered_at >= CURRENT_DATE')
+        else:
+            cursor.execute("SELECT COUNT(*) FROM audience_users WHERE DATE(discovered_at) = DATE('now', 'localtime')")
+        summary['today_found'] = int((cursor.fetchone() or [0])[0] or 0)
         summary['active'] = max(0, summary['total'] - summary['blacklisted'] - summary['unsubscribed'])
         cursor.close()
     return summary
