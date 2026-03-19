@@ -1,0 +1,10 @@
+[build]
+builder = "RAILPACK"
+watchPatterns = ["/bot_proBotik/**"]
+
+[deploy]
+startCommand = "uvicorn webhook:app --host 0.0.0.0 --port $PORT"
+healthcheckPath = "/health"
+healthcheckTimeout = 120
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 10
