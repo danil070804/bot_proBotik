@@ -54,8 +54,25 @@ async def set_webhook(drop_pending_updates: bool = False):
     return {'ok': True, 'result': result, 'url': _webhook_url()}
 
 
+@app.get('/webhook/set')
+async def set_webhook_get(drop_pending_updates: bool = False):
+    return await set_webhook(drop_pending_updates=drop_pending_updates)
+
+
+@app.get('/webhook/info')
+async def webhook_info():
+    api = TelegramBotAPI()
+    result = api.get_webhook_info()
+    return {'ok': True, 'configured_url': _webhook_url(), 'result': result}
+
+
 @app.post('/webhook/delete')
 async def delete_webhook(drop_pending_updates: bool = False):
     api = TelegramBotAPI()
     result = api.delete_webhook(drop_pending_updates=drop_pending_updates)
     return {'ok': True, 'result': result}
+
+
+@app.get('/webhook/delete')
+async def delete_webhook_get(drop_pending_updates: bool = False):
+    return await delete_webhook(drop_pending_updates=drop_pending_updates)

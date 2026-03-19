@@ -100,5 +100,8 @@ class TelegramBotAPI:
             payload['allowed_updates'] = list(allowed_updates)
         return self._request('setWebhook', payload)
 
+    def get_webhook_info(self):
+        return self._request('getWebhookInfo')
+
     def delete_webhook(self, drop_pending_updates=False):
         return self._request('deleteWebhook', {'drop_pending_updates': bool(drop_pending_updates)})
