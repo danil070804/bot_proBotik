@@ -75,6 +75,8 @@ class AudienceRepository:
     def _sync_user_copy(self, audience_user, payload):
         if not audience_user:
             return
+        if not audience_user.get('telegram_user_id'):
+            return
         source = (
             audience_user.get('source_value')
             or payload.get('source_value')

@@ -4,6 +4,7 @@ from db import (
     get_parse_task,
     get_parse_tasks_summary,
     list_parse_tasks,
+    update_parse_task_details,
     update_parse_task_progress,
     update_parse_task_status,
 )
@@ -24,6 +25,14 @@ class ParseTaskRepository:
 
     def update_progress(self, task_id, found=None, saved=None, skipped=None, errors=None):
         return update_parse_task_progress(task_id, found=found, saved=saved, skipped=skipped, errors=errors)
+
+    def update_details(self, task_id, source_report_json=None, last_error=None, meta_json=None):
+        return update_parse_task_details(
+            task_id,
+            source_report_json=source_report_json,
+            last_error=last_error,
+            meta_json=meta_json,
+        )
 
     def finish(self, task_id, status='finished'):
         return finish_parse_task(task_id, status=status)

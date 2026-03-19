@@ -16,7 +16,7 @@ from telethon.errors import (
 from telethon.tl.functions.channels import JoinChannelRequest
 from telethon.tl.functions.messages import ImportChatInviteRequest
 
-from services.target_normalizer import INVITE_TYPE, ParsedTarget, parse_target
+from services.target_normalizer import ParsedTarget, is_invite_target_type, parse_target
 
 try:
     from telethon.errors import InviteRequestSentError
@@ -44,7 +44,7 @@ class JoinService:
 
     async def join_target(self, client, raw_target):
         parsed = raw_target if isinstance(raw_target, ParsedTarget) else self.parse_target(raw_target)
-        if parsed.target_type == INVITE_TYPE:
+        if is_invite_target_type(parsed.target_type):
             return await self.join_private_invite(client, parsed)
         return await self.join_public_target(client, parsed)
 

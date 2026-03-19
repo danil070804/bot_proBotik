@@ -45,13 +45,20 @@ from repositories.users import UserRepository
 from services.campaign_service import CampaignService
 from services.account_health_service import AccountHealthService
 from services.join_request_service import JoinRequestService
-from services.target_normalizer import INVITE_TYPE, parse_target
+from services.target_normalizer import INVITE_TYPE, is_invite_target_type, parse_target
 from telegram.webhook_handlers import (
 	handle_chat_join_request as process_chat_join_request_update,
 	handle_chat_member_update as process_chat_member_update,
 	handle_message as process_message_update,
 )
-from ui.builders import build_entity_card, build_inline_keyboard, build_list_page, build_section_screen
+from ui.builders import (
+	build_confirm_screen,
+	build_entity_card,
+	build_inline_keyboard,
+	build_list_page,
+	build_section_screen,
+	build_status_screen,
+)
 
 from pyqiwip2p import QiwiP2P
 from pyqiwip2p.p2p_types import QiwiCustomer, QiwiDatetime
@@ -111,6 +118,7 @@ DEFAULT_APP_SETTINGS = {
 	'campaign_max_attempts': '1',
 	'campaign_stop_on_error_rate': '0.30',
 	'accounts_allow_limited': '0',
+	'interface_mode': 'pro',
 	'active_preset': 'standard',
 }
 PRESET_CONFIGS = {
@@ -191,6 +199,8 @@ def build_new_menu():
 		[('👥 Аудитория', 'audience_menu'), ('📂 Сообщества', 'communities_menu')],
 		[('🚀 Кампании', 'campaigns_menu'), ('📨 Заявки', 'join_requests_menu')],
 		[('📊 Аналитика', 'stats_overview'), ('📈 Статус', 'task_status')],
+		[('⚡ Быстрый парсинг', 'quick_parse'), ('🔄 Повторить', 'quick_repeat_last')],
+		[('🩺 Проверить', 'quick_accounts_check'), ('📌 Избранное', 'favorites_menu')],
 		[('⚙️ Настройки', 'settings_menu'), ('ℹ️ Помощь', 'help_new')],
 	])
 
@@ -214,21 +224,81 @@ def _compact_dt(value):
 	return text[:16] if len(text) > 16 else text
 
 
+def _interface_mode():
+	return str(_get_setting('interface_mode') or 'pro').strip().lower() or 'pro'
+
+
+def _is_compact_mode():
+	return _interface_mode() == 'compact'
+
+
+def _favorite_setting_key(entity_type):
+	return f'favorites_{str(entity_type or "").strip()}'
+
+
+def _get_favorites(entity_type):
+	try:
+		payload = json.loads(_get_setting(_favorite_setting_key(entity_type)) or '[]')
+		if isinstance(payload, list):
+			return payload
+	except Exception:
+		pass
+	return []
+
+
+def _set_favorites(entity_type, items):
+	_set_setting(_favorite_setting_key(entity_type), json.dumps(list(items), ensure_ascii=False))
+
+
+def _toggle_favorite(entity_type, entity_id):
+	items = [str(item) for item in _get_favorites(entity_type)]
+	value = str(entity_id)
+	if value in items:
+		items = [item for item in items if item != value]
+		added = False
+	else:
+		items.insert(0, value)
+		items = items[:20]
+		added = True
+	_set_favorites(entity_type, items)
+	return added
+
+
+def _is_favorite(entity_type, entity_id):
+	return str(entity_id) in [str(item) for item in _get_favorites(entity_type)]
+
+
+def _recent_platform_highlights():
+	items = []
+	last_task = next(iter(PARSE_TASK_REPO.list(limit=1)), None)
+	if last_task:
+		status = 'завершён' if last_task.get('status') == 'finished' else last_task.get('status') or '—'
+		items.append(f'Парсинг {last_task.get("source_value") or "без источника"} — {status}')
+	account_rows = _account_rows()
+	problem_count = len([row for row in account_rows if row.get('status') in {'limited', 'flooded', 'dead', 'invalid'}])
+	if problem_count:
+		items.append(f'Проверка аккаунтов — {problem_count} проблемных')
+	last_campaign = next(iter(CAMPAIGN_REPO.list()), None)
+	if last_campaign:
+		items.append(f'Кампания {last_campaign.get("name") or "без названия"} — {last_campaign.get("status") or "draft"}')
+	return items[:3]
+
+
 def _main_dashboard_text():
 	try:
 		audience = AUDIENCE_REPO.summary()
 		parse_summary = PARSE_TASK_REPO.summary()
 		campaigns = CAMPAIGN_REPO.list()
 		active_tasks = parse_summary.get('running', 0) + len([c for c in campaigns if c.get('status') == 'running'])
-		return build_section_screen(
-			'🏠 Teddy Invite',
-			stats=[
-				('Аккаунты', len(list_sessions()), ' 🟢'),
-				('Аудитория', audience.get('total', 0)),
-				('Активных задач', active_tasks),
-			],
-			description='Выбери раздел:'
-		)
+		stats = [
+			('Аккаунты', len(list_sessions()), ' 🟢'),
+			('Аудитория', audience.get('total', 0)),
+			('Парсинг', f'{parse_summary.get("running", 0) + parse_summary.get("queued", 0)} задачи'),
+			('Кампании', f'{len([c for c in campaigns if c.get("status") in ["running", "scheduled"]])} активна'),
+		]
+		highlights = _recent_platform_highlights()
+		footer = 'Выбери раздел:' if _is_compact_mode() else 'Выбери раздел или быстрый сценарий ниже.'
+		return build_status_screen('🏠 Teddy Invite', stats=stats, highlights=highlights, footer=footer)
 	except Exception as e:
 		return build_section_screen('🏠 Teddy Invite', description=f'Не удалось собрать экран: {e}')
 
@@ -282,13 +352,20 @@ def _parsing_text():
 	recent_tasks = PARSE_TASK_REPO.list(limit=5)
 	last_task = recent_tasks[0] if recent_tasks else None
 	active_tasks = int(parse_summary.get('running', 0) or 0) + int(parse_summary.get('queued', 0) or 0)
-	return build_section_screen(
+	highlights = []
+	if last_task and last_task.get('last_error'):
+		highlights.append(f'Последняя ошибка: {(last_task.get("last_error") or "")[:80]}')
+	if recent_tasks:
+		last_done = recent_tasks[0]
+		highlights.append(f'Рекомендуем: открыть задачу #{last_done.get("id")} или повторить последний запуск')
+	return build_status_screen(
 		'📡 Парсинг',
 		stats=[
 			('Активных задач', active_tasks),
 			('Последний запуск', _compact_dt((last_task or {}).get('created_at') or (last_task or {}).get('started_at'))),
 		],
-		description='Выбери режим:'
+		highlights=[] if _is_compact_mode() else highlights,
+		footer='Выбери режим:'
 	)
 
 
@@ -585,11 +662,19 @@ def _communities_list_text(page=0):
 
 def _build_communities_list_keyboard(page=0):
 	rows = _community_rows()
-	_, page, total_pages = _slice_page(rows, page, CAMPAIGNS_PAGE_SIZE)
-	return build_inline_keyboard([
-		[('⬅️', f'communities_list|{max(0, page - 1)}'), ('➡️', f'communities_list|{min(total_pages - 1, page + 1)}')],
-		[('⬅️ Назад', 'communities_menu')],
-	])
+	items, page, total_pages = _slice_page(rows, page, CAMPAIGNS_PAGE_SIZE)
+	rows_spec = []
+	if items:
+		open_buttons = [
+			(str(local_idx), f'community_view|{item.get("id")}|{page}')
+			for local_idx, item in enumerate(items, start=1)
+		]
+		rows_spec.append(open_buttons[:4])
+		if len(open_buttons) > 4:
+			rows_spec.append(open_buttons[4:8])
+	rows_spec.append([('⬅️', f'communities_list|{max(0, page - 1)}'), ('➡️', f'communities_list|{min(total_pages - 1, page + 1)}')])
+	rows_spec.append([('⬅️ Назад', 'communities_menu')])
+	return build_inline_keyboard(rows_spec)
 
 
 def _account_status_emoji(status):
@@ -882,12 +967,19 @@ def _format_progress_text(item, progress):
 			f'Комментариев: {progress.get("comments_parsed", 0)}\n'
 			f'Ошибок: {progress.get("errors", 0)}'
 		)
+		source_results = progress.get('source_results') or []
+		if source_results and not _is_compact_mode():
+			lines = []
+			for row in source_results[-3:]:
+				status = 'success' if row.get('status') == 'success' else row.get('error_code') or row.get('status') or '—'
+				lines.append(f'{row.get("source_title") or row.get("source")} — {status}, saved {row.get("saved", 0)}')
+			text += '\n\nПоследние источники:\n' + '\n'.join(lines[:3])
 		last_error = str(progress.get('last_error', '') or '').strip()
 		if last_error:
 			text += f'\nПоследняя ошибка: {last_error[:300]}'
 		return text
 	if mode == 'join_target':
-		target_type = 'private invite' if progress.get('target_type') == INVITE_TYPE else 'public username'
+		target_type = 'private invite' if is_invite_target_type(progress.get('target_type')) else 'public username'
 		text = (
 			f'➕ Вход аккаунтов в цель\n'
 			f'Цель: {progress.get("target", "-")}\n'
@@ -993,12 +1085,19 @@ def _queue_worker():
 						f'Пользователей: {progress.get("users_parsed", 0)}\n'
 						f'Комментариев: {progress.get("comments_parsed", 0)}'
 					)
+					source_results = progress.get('source_results') or []
+					if source_results:
+						lines = []
+						for row in source_results[:6]:
+							status = 'success' if row.get('status') == 'success' else row.get('error_code') or row.get('status') or '—'
+							lines.append(f'{row.get("source_title") or row.get("source")} — {status}, saved {row.get("saved", 0)}')
+						text += '\n\nПо источникам:\n' + '\n'.join(lines)
 					last_error = str(progress.get('last_error', '') or '').strip()
 					if last_error:
 						text += f'\n\nПоследняя ошибка:\n{last_error[:800]}'
 					_render_inline(item['user_id'], msg_id, text, parse_mode=None)
 				elif progress.get('mode') == 'join_target':
-					target_type = 'private invite' if progress.get('target_type') == INVITE_TYPE else 'public username'
+					target_type = 'private invite' if is_invite_target_type(progress.get('target_type')) else 'public username'
 					text = (
 						f'✅ Завершено: {item["title"]}\n'
 						f'Код: {code}\n'
@@ -1371,11 +1470,15 @@ def _import_users_from_bytes(filename, data):
 		if not isinstance(row, dict):
 			continue
 		telegram_user_id = row.get('telegram_user_id') or row.get('user_id') or row.get('id')
-		if telegram_user_id in [None, '']:
-			continue
-		try:
-			telegram_user_id = int(str(telegram_user_id).strip())
-		except Exception:
+		username = str(row.get('username') or '').strip().lstrip('@')
+		if telegram_user_id not in [None, '']:
+			try:
+				telegram_user_id = int(str(telegram_user_id).strip())
+			except Exception:
+				telegram_user_id = None
+		else:
+			telegram_user_id = None
+		if telegram_user_id in [None, ''] and username == '':
 			continue
 		tags = row.get('tags') or []
 		if isinstance(tags, str):
@@ -1389,7 +1492,7 @@ def _import_users_from_bytes(filename, data):
 		)
 		AUDIENCE_REPO.upsert(
 			telegram_user_id=telegram_user_id,
-			username=str(row.get('username') or '').strip().lstrip('@'),
+			username=username,
 			first_name=str(row.get('first_name') or '').strip(),
 			last_name=str(row.get('last_name') or '').strip(),
 			source_id=(source or {}).get('id'),
@@ -1444,6 +1547,7 @@ def _setting_title(key):
 		'parser_comments_limit': 'Лимит комментариев парсинга',
 		'parser_use_all_sessions': 'Использовать все аккаунты в парсинге',
 		'accounts_allow_limited': 'Разрешить ограниченные аккаунты',
+		'interface_mode': 'Режим интерфейса',
 		'campaign_rate_limit_per_minute': 'Rate limit в минуту',
 		'campaign_rate_limit_per_hour': 'Rate limit в час',
 		'campaign_max_attempts': 'Максимум попыток доставки',
@@ -1483,7 +1587,7 @@ def _settings_category_text(category):
 		'logic': ('🧠 Логика', f'Пресет: {_preset_title(_get_setting("active_preset"))}. Max attempts: {_setting_int("campaign_max_attempts")}.'),
 		'limits': ('⏱ Лимиты', f'Парсинг: {_setting_int("parser_posts_limit")} / {_setting_int("parser_comments_limit")}. Rate: {_setting_int("campaign_rate_limit_per_minute")}/мин.'),
 		'notifications': ('🔔 Уведомления', 'Системные уведомления и служебные сообщения будут вынесены сюда.'),
-		'interface': ('🎨 Интерфейс', 'Планируется compact/pro режим и настройка визуального стиля.'),
+		'interface': ('🎨 Интерфейс', f'Режим: {"Compact" if _is_compact_mode() else "Pro"}. Compact показывает только ключевые метрики, Pro — расширенные summary.'),
 		'security': ('🛡 Безопасность', f'Прогрев аккаунтов: {_setting_int("account_warmup_days")} дн. Ограниченные аккаунты: {"вкл" if _setting_bool("accounts_allow_limited") else "выкл"}.'),
 	}
 	title, description = data.get(category, ('⚙️ Настройки', 'Раздел в разработке.'))
@@ -1508,6 +1612,11 @@ def _build_settings_detail_menu(category):
 		return build_inline_keyboard([
 			[('🕒 Прогрев', 'settings_edit|account_warmup_days')],
 			[('🟡 Ограниченные', 'settings_toggle|accounts_allow_limited')],
+			[('⬅️ Назад', 'settings_menu')],
+		])
+	if category == 'interface':
+		return build_inline_keyboard([
+			[('📦 Compact', 'settings_interface_mode|compact'), ('🧠 Pro', 'settings_interface_mode|pro')],
 			[('⬅️ Назад', 'settings_menu')],
 		])
 	return build_inline_keyboard([[('⬅️ Назад', 'settings_menu')]])
@@ -1547,6 +1656,7 @@ def _build_parser_menu():
 	return build_inline_keyboard([
 		[('👥 Участники', 'parser_mode|members'), ('💬 Комментаторы', 'parser_mode|commenters')],
 		[('📝 Авторы', 'parser_mode|message_authors'), ('📂 Импорт', 'parser_mode|import_file')],
+		[('✍️ Вручную', 'parser_mode|manual_add')],
 		[('📋 Задачи', 'task_status'), ('🔁 Повторить', 'parser_repeat_last')],
 		[('⬅️ Назад', 'main_menu')],
 	])
@@ -1626,15 +1736,26 @@ def _segment_detail_text(segment_id):
 	if not segment:
 		return 'Сегмент не найден.'
 	users = SEGMENT_REPO.get_users(segment_id, limit=1000)
+	star = '⭐ Да' if _is_favorite('segments', segment_id) else '☆ Нет'
 	return (
 		f'🧩 <b>{segment.get("name")}</b>\n'
 		f'ID: <code>{segment.get("id")}</code>\n'
 		f'Пользователей (preview ≤1000): <b>{len(users)}</b>\n'
+		f'Избранное: <b>{star}</b>\n'
 		f'Фильтр: <code>{json.dumps(segment.get("filter_json") or {}, ensure_ascii=False)}</code>'
 	)
 
 
+def _build_segment_actions(segment_id):
+	label = '⭐ Убрать' if _is_favorite('segments', segment_id) else '⭐ В избранное'
+	return build_inline_keyboard([
+		[(label, f'favorite_toggle|segments|{segment_id}|0')],
+		[('⬅️ Назад', 'segments_menu')],
+	])
+
+
 def _build_campaign_actions(campaign_id, page=0):
+	favorite_label = '⭐ Убрать' if _is_favorite('campaigns', campaign_id) else '⭐ В избранное'
 	keyboard = types.InlineKeyboardMarkup()
 	keyboard.add(
 		types.InlineKeyboardButton(text='▶️ Запустить', callback_data=f'campaign_start|{campaign_id}|{page}'),
@@ -1644,6 +1765,7 @@ def _build_campaign_actions(campaign_id, page=0):
 		types.InlineKeyboardButton(text='🔄 Возобновить', callback_data=f'campaign_resume|{campaign_id}|{page}'),
 		types.InlineKeyboardButton(text='🛑 Отменить', callback_data=f'campaign_cancel|{campaign_id}|{page}'),
 	)
+	keyboard.add(types.InlineKeyboardButton(text=favorite_label, callback_data=f'favorite_toggle|campaigns|{campaign_id}|{page}'))
 	keyboard.add(types.InlineKeyboardButton(text='⬅️ Назад', callback_data=f'campaigns_list|{page}'))
 	return keyboard
 
@@ -1654,12 +1776,14 @@ def _campaign_detail_text(campaign_id):
 		return 'Кампания не найдена.'
 	stats = CAMPAIGN_REPO.get_stats(campaign_id)
 	community = COMMUNITY_REPO.get(campaign.get('community_id'))
+	star = '⭐ Да' if _is_favorite('campaigns', campaign_id) else '☆ Нет'
 	return (
 		f'🚀 <b>Кампания</b>\n\n'
 		f'Название: <b>{campaign.get("name")}</b>\n'
 		f'Статус: {_campaign_status_emoji(campaign.get("status"))} <b>{campaign.get("status")}</b>\n'
 		f'Сообщество: <b>{(community or {}).get("title", "-")}</b>\n'
 		f'Режим: <b>{_community_mode_title(campaign.get("invite_mode"))}</b>\n'
+		f'Избранное: <b>{star}</b>\n'
 		f'Rate: <code>{campaign.get("rate_limit_per_minute")}/мин</code>\n\n'
 		f'Получатели: <b>{stats.get("total", 0)}</b>\n'
 		f'Отправлено: <b>{stats.get("sent", 0)}</b>\n'
@@ -1759,7 +1883,14 @@ def _stats_text():
 		conversion = 0
 		if total_stats.get('sent', 0):
 			conversion = round((total_stats.get('approved', 0) + total_stats.get('joined', 0)) * 100 / max(1, total_stats.get('sent', 0)))
-		return build_section_screen(
+		highlights = [
+			f'Парсинг: {parse_summary.get("total_saved", 0)} сохранено',
+			f'Отправлено: {total_stats.get("sent", 0)}',
+			f'Одобрено: {total_stats.get("approved", 0)}',
+			f'Вступили: {total_stats.get("joined", 0)}',
+			f'Ожидают: {jr_status.get("pending", 0)}',
+		]
+		return build_status_screen(
 			'📊 Аналитика',
 			stats=[
 				('Аудитория', audience.get('total', 0)),
@@ -1767,13 +1898,7 @@ def _stats_text():
 				('Заявки', total_requests),
 				('Конверсия', f'{conversion}%'),
 			],
-			description=(
-				f'Парсинг: {parse_summary.get("total_saved", 0)} сохранено\n'
-				f'Отправлено: {total_stats.get("sent", 0)}\n'
-				f'Одобрено: {total_stats.get("approved", 0)}\n'
-				f'Вступили: {total_stats.get("joined", 0)}\n'
-				f'Ожидают: {jr_status.get("pending", 0)}'
-			)
+			highlights=[] if _is_compact_mode() else highlights,
 		)
 	except Exception as e:
 		return f'Не удалось собрать аналитику: {e}'
@@ -1785,7 +1910,12 @@ def _status_text():
 	active_campaigns = len([item for item in campaigns if item.get('status') in ['running', 'scheduled']])
 	pending_requests = len(JOIN_REQUEST_REPO.list(status='pending', limit=1000))
 	audience = AUDIENCE_REPO.summary()
-	return build_section_screen(
+	highlights = []
+	last_task = next(iter(PARSE_TASK_REPO.list(limit=1)), None)
+	if last_task and last_task.get('last_error'):
+		highlights.append(f'Последняя ошибка парсинга: {(last_task.get("last_error") or "")[:90]}')
+	highlights.append(f'База: {audience.get("total", 0)} пользователей')
+	return build_status_screen(
 		'📈 Статус системы',
 		stats=[
 			('Аккаунты', len(list_sessions()), ' 🟢'),
@@ -1793,7 +1923,7 @@ def _status_text():
 			('Кампании', f'{active_campaigns} активны'),
 			('Заявки', f'{pending_requests} ожидают'),
 		],
-		description=f'База: {audience.get("total", 0)}'
+		highlights=[] if _is_compact_mode() else highlights,
 	)
 
 
@@ -1802,6 +1932,86 @@ def _build_status_menu():
 		[('🔄 Обновить', 'task_status'), ('🧯 Ошибки', 'status_errors')],
 		[('⏸ Остановить всё', 'status_stop_all')],
 		[('⬅️ Назад', 'main_menu')],
+	])
+
+
+def _build_favorites_menu():
+	return build_inline_keyboard([
+		[('📂 Сообщества', 'favorites_view|communities'), ('🧩 Сегменты', 'favorites_view|segments')],
+		[('🚀 Кампании', 'favorites_view|campaigns'), ('📡 Источники', 'favorites_view|sources')],
+		[('⬅️ Назад', 'main_menu')],
+	])
+
+
+def _favorites_text(kind=None):
+	community_ids = _get_favorites('communities')
+	segment_ids = _get_favorites('segments')
+	campaign_ids = _get_favorites('campaigns')
+	source_values = _get_favorites('sources')
+	if not kind:
+		return build_status_screen(
+			'📌 Избранное',
+			stats=[
+				('Источники', len(source_values)),
+				('Сегменты', len(segment_ids)),
+				('Сообщества', len(community_ids)),
+				('Кампании', len(campaign_ids)),
+			],
+			highlights=[] if _is_compact_mode() else ['Открой раздел ниже, чтобы быстро перейти к сохранённым сущностям.'],
+		)
+	highlights = []
+	if kind == 'communities':
+		for item_id in community_ids[:6]:
+			item = COMMUNITY_REPO.get(int(item_id))
+			if item:
+				highlights.append(f'{item.get("title") or item.get("chat_id")} · {_community_mode_title(item.get("default_invite_mode"))}')
+	if kind == 'segments':
+		for item_id in segment_ids[:6]:
+			item = SEGMENT_REPO.get(int(item_id))
+			if item:
+				highlights.append(f'{item.get("name")} · id {item.get("id")}')
+	if kind == 'campaigns':
+		for item_id in campaign_ids[:6]:
+			item = CAMPAIGN_REPO.get(int(item_id))
+			if item:
+				highlights.append(f'{item.get("name")} · {item.get("status")}')
+	if kind == 'sources':
+		for value in source_values[:6]:
+			highlights.append(str(value))
+	title_map = {
+		'communities': '📌 Избранное · Сообщества',
+		'segments': '📌 Избранное · Сегменты',
+		'campaigns': '📌 Избранное · Кампании',
+		'sources': '📌 Избранное · Источники',
+	}
+	return build_status_screen(title_map.get(kind, '📌 Избранное'), highlights=highlights or ['Пока пусто.'])
+
+
+def _community_detail_text(community_id):
+	item = COMMUNITY_REPO.get(community_id)
+	if not item:
+		return 'Сообщество не найдено.'
+	star = '⭐ В избранном' if _is_favorite('communities', community_id) else '☆ Не в избранном'
+	return build_entity_card(
+		'📂 Сообщество',
+		[
+			('Название', item.get('title') or '—'),
+			('Chat ID', item.get('chat_id'), 'code'),
+			('Тип', item.get('type') or 'group'),
+			('Режим', _community_mode_title(item.get('default_invite_mode'))),
+			('Автоодобрение', 'Да' if item.get('auto_approve_join_requests') else 'Нет'),
+			('Strict', 'Да' if item.get('strict_moderation') else 'Нет'),
+			('Статус', '🟢 Активно' if item.get('is_active') else '⚫ Неактивно'),
+			('Избранное', star),
+		],
+	)
+
+
+def _build_community_actions(community_id, page=0):
+	label = '⭐ Убрать' if _is_favorite('communities', community_id) else '⭐ В избранное'
+	return build_inline_keyboard([
+		[(label, f'favorite_toggle|communities|{community_id}|{page}')],
+		[('⬅️ Назад', f'communities_list|{page}')],
 	])
 
 
@@ -2434,12 +2644,22 @@ def _queue_parser_job(message, state):
 		bot.send_message(message.chat.id, '⚠️ Не нашёл источники. Запусти парсинг заново.', reply_markup=build_new_menu())
 		return
 	parse_mode = state.get('parse_mode') or 'members'
+	task_meta = {
+		'sources': str(state.get('sources') or '').strip(),
+		'parse_mode': parse_mode,
+		'members_limit': int(state.get('members_limit') or 0),
+		'posts_limit': int(state.get('posts_limit') or 0),
+		'comments_limit': int(state.get('comments_limit') or 0),
+		'messages_limit': int(state.get('messages_limit') or 0),
+		'use_all_sessions': _setting_bool('parser_use_all_sessions'),
+	}
 	task = PARSE_TASK_REPO.create(
 		mode=parse_mode,
 		source_type='chat',
 		source_value=str(state.get('sources') or '').strip(),
 		status='queued',
 		created_by=message.chat.id,
+		meta_json=task_meta,
 	)
 	command = [
 		sys.executable, os.path.join('workers', 'parser_worker.py'),
@@ -2478,6 +2698,66 @@ def _queue_parser_job(message, state):
 		'Как только задача стартует — прогресс пойдёт в <code>parse_tasks</code> и live-status.',
 		parse_mode='HTML',
 		reply_markup=build_new_menu()
+	)
+
+
+def _queue_parser_task_from_record(chat_id, task, panel_msg_id=None):
+	task = task or {}
+	meta = task.get('meta_json') or {}
+	sources = str(meta.get('sources') or task.get('source_value') or '').strip()
+	file_name, sources_count = _save_targets_file(chat_id, sources, 'parser_sources_repeat')
+	if sources_count == 0:
+		_render_inline(
+			chat_id,
+			panel_msg_id,
+			build_confirm_screen('🔄 Повтор запуска', summary='У последней задачи нет сохранённых источников.'),
+			reply_markup=_build_parser_menu(),
+			parse_mode='HTML'
+		)
+		return
+	parse_mode = str(meta.get('parse_mode') or task.get('mode') or 'members').strip()
+	repeat_task = PARSE_TASK_REPO.create(
+		mode=parse_mode,
+		source_type=task.get('source_type') or 'chat',
+		source_value=sources,
+		status='queued',
+		created_by=chat_id,
+		meta_json=meta,
+	)
+	command = [
+		sys.executable, os.path.join('workers', 'parser_worker.py'),
+		'--mode', parse_mode,
+		'--targets-file', file_name,
+		'--task-id', str(repeat_task.get('id')),
+	]
+	if parse_mode == 'members':
+		command += ['--members-limit', str(int(meta.get('members_limit') or _setting_int('parser_posts_limit')))]
+	elif parse_mode == 'commenters':
+		command += [
+			'--posts-limit', str(int(meta.get('posts_limit') or _setting_int('parser_posts_limit'))),
+			'--comments-limit', str(int(meta.get('comments_limit') or _setting_int('parser_comments_limit'))),
+		]
+	elif parse_mode == 'message_authors':
+		command += ['--messages-limit', str(int(meta.get('messages_limit') or _setting_int('parser_posts_limit')))]
+	if bool(meta.get('use_all_sessions')):
+		command.append('--use-all-sessions')
+	progress_file = _progress_file(chat_id, 'parser')
+	command += ['--progress-file', progress_file]
+	queue_pos = _enqueue_process(chat_id, f'parser {parse_mode} ({sources_count} sources)', command, progress_file=progress_file)
+	_render_inline(
+		chat_id,
+		panel_msg_id,
+		build_confirm_screen(
+			'🔄 Последний запуск повторён',
+			summary=[
+				f'Task ID: {repeat_task.get("id")}',
+				f'Режим: {_parser_mode_title(parse_mode)}',
+				f'Источников: {sources_count}',
+				f'Позиция: ~{queue_pos}',
+			],
+		),
+		reply_markup=build_new_menu(),
+		parse_mode='HTML'
 	)
 
 
@@ -2656,7 +2936,7 @@ def join_target_step_target(message):
 		state.get('panel_msg_id'),
 		f'✅ <b>Вход аккаунтов поставлен в очередь</b>\n'
 		f'• Цель: <code>{parsed_target.display_value}</code>\n'
-		f'• Тип: <b>{"private invite" if parsed_target.target_type == INVITE_TYPE else "public username"}</b>\n'
+		f'• Тип: <b>{"private invite" if is_invite_target_type(parsed_target.target_type) else "public username"}</b>\n'
 		f'• Метод: <code>{parsed_target.join_method}</code>\n'
 		f'• Аккаунтов: <b>{len(list_sessions())}</b>\n'
 		f'• Позиция: <b>~{queue_pos}</b>\n'
@@ -2818,6 +3098,71 @@ def podcategors(call):
 		_render_inline(call.message.chat.id, call.message.message_id, _main_dashboard_text(), reply_markup=build_new_menu(), parse_mode='HTML')
 		return
 
+	if call.data == 'quick_parse':
+		_render_inline(call.message.chat.id, call.message.message_id, _parsing_text(), parse_mode='HTML', reply_markup=_build_parser_menu())
+		return
+
+	if call.data == 'quick_repeat_last':
+		last_task = PARSE_TASK_REPO.list(limit=1)
+		if not last_task:
+			_render_inline(
+				call.message.chat.id,
+				call.message.message_id,
+				build_confirm_screen('🔄 Повтор запуска', summary='Нет предыдущей задачи парсинга для повтора.'),
+				parse_mode='HTML',
+				reply_markup=build_new_menu()
+			)
+			return
+		_queue_parser_task_from_record(call.message.chat.id, last_task[0], panel_msg_id=call.message.message_id)
+		return
+
+	if call.data == 'quick_accounts_check':
+		call.data = 'accounts_check_all'
+
+	if call.data == 'favorites_menu':
+		_render_inline(call.message.chat.id, call.message.message_id, _favorites_text(), parse_mode='HTML', reply_markup=_build_favorites_menu())
+		return
+
+	if call.data.startswith('favorites_view|'):
+		kind = call.data.split('|', 1)[1]
+		_render_inline(call.message.chat.id, call.message.message_id, _favorites_text(kind), parse_mode='HTML', reply_markup=_build_favorites_menu())
+		return
+
+	if call.data.startswith('favorite_toggle|'):
+		parts = call.data.split('|')
+		entity_type = parts[1]
+		entity_id = parts[2]
+		page = parts[3] if len(parts) > 3 else '0'
+		_toggle_favorite(entity_type, entity_id)
+		if entity_type == 'campaigns':
+			_render_inline(
+				call.message.chat.id,
+				call.message.message_id,
+				_campaign_detail_text(int(entity_id)),
+				parse_mode='HTML',
+				reply_markup=_build_campaign_actions(int(entity_id), page=page)
+			)
+			return
+		if entity_type == 'segments':
+			_render_inline(
+				call.message.chat.id,
+				call.message.message_id,
+				_segment_detail_text(int(entity_id)),
+				parse_mode='HTML',
+				reply_markup=_build_segment_actions(int(entity_id))
+			)
+			return
+		if entity_type == 'communities':
+			_render_inline(
+				call.message.chat.id,
+				call.message.message_id,
+				_community_detail_text(int(entity_id)),
+				parse_mode='HTML',
+				reply_markup=_build_community_actions(int(entity_id), page=page)
+			)
+			return
+		return
+
 	if call.data == 'settings_menu':
 		_render_inline(call.message.chat.id, call.message.message_id, _settings_text(), parse_mode='HTML', reply_markup=_build_settings_menu())
 		return
@@ -2840,9 +3185,15 @@ def podcategors(call):
 	if call.data == 'parser_repeat_last':
 		last_task = PARSE_TASK_REPO.list(limit=1)
 		if not last_task:
-			_render_inline(call.message.chat.id, call.message.message_id, _stub_text('📡 Повтор запуска', 'Нет предыдущей задачи для повтора.'), parse_mode='HTML', reply_markup=_build_parser_menu())
+			_render_inline(
+				call.message.chat.id,
+				call.message.message_id,
+				build_confirm_screen('🔄 Повтор запуска', summary='Нет предыдущей задачи для повтора.'),
+				parse_mode='HTML',
+				reply_markup=_build_parser_menu()
+			)
 			return
-		_render_inline(call.message.chat.id, call.message.message_id, _stub_text('📡 Повтор запуска', 'Повтор последней задачи будет добавлен на следующем этапе.'), parse_mode='HTML', reply_markup=_build_parser_menu())
+		_queue_parser_task_from_record(call.message.chat.id, last_task[0], panel_msg_id=call.message.message_id)
 		return
 
 	if call.data == 'communities_menu':
@@ -2867,6 +3218,19 @@ def podcategors(call):
 			_communities_list_text(page),
 			parse_mode='HTML',
 			reply_markup=_build_communities_list_keyboard(page)
+		)
+		return
+
+	if call.data.startswith('community_view|'):
+		parts = call.data.split('|')
+		community_id = int(parts[1])
+		page = parts[2] if len(parts) > 2 else 0
+		_render_inline(
+			call.message.chat.id,
+			call.message.message_id,
+			_community_detail_text(community_id),
+			parse_mode='HTML',
+			reply_markup=_build_community_actions(community_id, page=page)
 		)
 		return
 
@@ -3077,7 +3441,7 @@ def podcategors(call):
 
 	if call.data.startswith('segment_view|'):
 		segment_id = int(call.data.split('|', 1)[1])
-		_render_inline(call.message.chat.id, call.message.message_id, _segment_detail_text(segment_id), parse_mode='HTML', reply_markup=_build_segments_menu())
+		_render_inline(call.message.chat.id, call.message.message_id, _segment_detail_text(segment_id), parse_mode='HTML', reply_markup=_build_segment_actions(segment_id))
 		return
 
 	if call.data == 'campaigns_menu':
@@ -3288,6 +3652,21 @@ def podcategors(call):
 			f'✅ {_setting_title(key)}: {"ВЫКЛ" if cur else "ВКЛ"}\n\n' + _settings_text(),
 			parse_mode='HTML',
 			reply_markup=_build_settings_menu()
+		)
+		return
+
+	if call.data.startswith('settings_interface_mode|'):
+		mode = call.data.split('|', 1)[1]
+		if mode not in ['compact', 'pro']:
+			bot.answer_callback_query(call.id, 'Неизвестный режим')
+			return
+		_set_setting('interface_mode', mode)
+		_render_inline(
+			call.message.chat.id,
+			call.message.message_id,
+			f'✅ Режим интерфейса: <b>{mode.capitalize()}</b>\n\n' + _settings_category_text('interface'),
+			parse_mode='HTML',
+			reply_markup=_build_settings_detail_menu('interface')
 		)
 		return
 
@@ -3679,10 +4058,31 @@ def podcategors(call):
 
 	if call.data == 'status_errors':
 		lines = []
+		account_rows = _account_rows()
+		account_errors = [row for row in account_rows if row.get('status') in {'limited', 'flooded', 'dead', 'invalid'}]
+		failed_campaigns = [item for item in CAMPAIGN_REPO.list() if item.get('status') == 'failed']
+		for row in account_errors[:5]:
+			lines.append(f'Аккаунт {row.get("phone")} — {row.get("reason_code") or row.get("status")}')
+		for task in PARSE_TASK_REPO.list(limit=6):
+			if task.get('status') == 'failed' or task.get('last_error'):
+				lines.append(f'Парсинг #{task.get("id")} — {(task.get("last_error") or task.get("status") or "")[:90]}')
+		for campaign in failed_campaigns[:5]:
+			lines.append(f'Кампания {campaign.get("name")} — failed')
 		for item in RUNNING_TASKS.get(call.message.chat.id, []):
-			if item.get('status') in ['failed', 'stopped']:
-				lines.append(f'{item.get("title")} — {item.get("status")}')
-		text = _stub_text('🧯 Ошибки', 'Ошибок нет.') if not lines else build_section_screen('🧯 Ошибки', description='\n'.join(lines))
+			progress = item.get('last_progress') or {}
+			last_error = str(progress.get('last_error') or '').strip()
+			if last_error:
+				lines.append(f'{item.get("title")} — {last_error[:90]}')
+		text = build_status_screen(
+			'🧯 Ошибки',
+			stats=[
+				('Аккаунты', len(account_errors)),
+				('Парсинг', len([task for task in PARSE_TASK_REPO.list(limit=20) if task.get("status") == "failed" or task.get("last_error")])),
+				('Кампании', len(failed_campaigns)),
+				('Процессы', len([item for item in RUNNING_TASKS.get(call.message.chat.id, []) if (item.get("last_progress") or {}).get("last_error")])),
+			],
+			highlights=lines or ['Ошибок нет.'],
+		)
 		_render_inline(call.message.chat.id, call.message.message_id, text, reply_markup=_build_status_menu(), parse_mode='HTML')
 		return
 

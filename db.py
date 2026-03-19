@@ -55,6 +55,17 @@ def _ensure_account_health_schema(cursor):
         _ensure_sqlite_column(cursor, 'account_health', 'entity_check_ok', 'INTEGER DEFAULT 0')
 
 
+def _ensure_parse_tasks_schema(cursor):
+    if IS_POSTGRES:
+        cursor.execute('ALTER TABLE parse_tasks ADD COLUMN IF NOT EXISTS meta_json TEXT DEFAULT \'{}\'')
+        cursor.execute('ALTER TABLE parse_tasks ADD COLUMN IF NOT EXISTS source_report_json TEXT DEFAULT \'[]\'')
+        cursor.execute('ALTER TABLE parse_tasks ADD COLUMN IF NOT EXISTS last_error TEXT')
+    else:
+        _ensure_sqlite_column(cursor, 'parse_tasks', 'meta_json', 'TEXT DEFAULT "{}"')
+        _ensure_sqlite_column(cursor, 'parse_tasks', 'source_report_json', 'TEXT DEFAULT "[]"')
+        _ensure_sqlite_column(cursor, 'parse_tasks', 'last_error', 'TEXT')
+
+
 @contextmanager
 def get_connection():
     conn = None
@@ -145,7 +156,8 @@ def init_db():
                 'id BIGSERIAL PRIMARY KEY, mode TEXT NOT NULL, source_type TEXT NOT NULL, source_value TEXT NOT NULL, '
                 'status TEXT DEFAULT \'draft\', total_found INTEGER DEFAULT 0, total_saved INTEGER DEFAULT 0, '
                 'total_skipped INTEGER DEFAULT 0, total_errors INTEGER DEFAULT 0, started_at TIMESTAMP NULL, '
-                'finished_at TIMESTAMP NULL, created_by BIGINT NULL, created_at TIMESTAMP DEFAULT NOW())'
+                'finished_at TIMESTAMP NULL, created_by BIGINT NULL, meta_json TEXT DEFAULT \'{}\', '
+                'source_report_json TEXT DEFAULT \'[]\', last_error TEXT, created_at TIMESTAMP DEFAULT NOW())'
             )
             cursor.execute(
                 'CREATE TABLE IF NOT EXISTS audience_sources('
@@ -291,7 +303,8 @@ def init_db():
                 'id INTEGER PRIMARY KEY AUTOINCREMENT, mode TEXT NOT NULL, source_type TEXT NOT NULL, '
                 'source_value TEXT NOT NULL, status TEXT DEFAULT "draft", total_found INTEGER DEFAULT 0, '
                 'total_saved INTEGER DEFAULT 0, total_skipped INTEGER DEFAULT 0, total_errors INTEGER DEFAULT 0, '
-                'started_at TEXT NULL, finished_at TEXT NULL, created_by INTEGER NULL, '
+                'started_at TEXT NULL, finished_at TEXT NULL, created_by INTEGER NULL, meta_json TEXT DEFAULT "{}", '
+                'source_report_json TEXT DEFAULT "[]", last_error TEXT, '
                 'created_at TEXT DEFAULT CURRENT_TIMESTAMP)'
             )
             cursor.execute(
@@ -374,6 +387,7 @@ def init_db():
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_join_requests_status ON join_requests(status)')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_join_requests_lookup ON join_requests(community_id, telegram_user_id)')
         _ensure_account_health_schema(cursor)
+        _ensure_parse_tasks_schema(cursor)
         conn.commit()
         cursor.close()
 
@@ -1288,7 +1302,7 @@ def get_parse_task(task_id):
         else:
             cursor.execute('SELECT * FROM parse_tasks WHERE id = ?', (task_id,))
         row = cursor.fetchone()
-        result = _row_to_dict(cursor, row)
+        result = _decode_json_fields(_row_to_dict(cursor, row), fields=['meta_json', 'source_report_json'])
         cursor.close()
     return result
 
@@ -1307,38 +1321,41 @@ def list_parse_tasks(status=None, limit=None):
         cursor = conn.cursor()
         cursor.execute(sql_text, tuple(params))
         rows = cursor.fetchall()
-        result = _rows_to_dicts(cursor, rows)
+        result = [_decode_json_fields(item, fields=['meta_json', 'source_report_json']) for item in _rows_to_dicts(cursor, rows)]
         cursor.close()
     return result
 
 
-def create_parse_task(mode, source_type, source_value, status='draft', created_by=None):
+def create_parse_task(mode, source_type, source_value, status='draft', created_by=None, meta_json=None):
     task_id = None
+    meta_text = _json_text(meta_json, default='{}')
     with get_connection() as conn:
         cursor = conn.cursor()
         if IS_POSTGRES:
             cursor.execute(
-                'INSERT INTO parse_tasks(mode, source_type, source_value, status, created_by) '
-                'VALUES (%s, %s, %s, %s, %s) RETURNING id',
+                'INSERT INTO parse_tasks(mode, source_type, source_value, status, created_by, meta_json) '
+                'VALUES (%s, %s, %s, %s, %s, %s) RETURNING id',
                 (
                     str(mode or 'members').strip(),
                     str(source_type or 'chat').strip(),
                     str(source_value or '').strip(),
                     str(status or 'draft').strip(),
                     created_by,
+                    meta_text,
                 ),
             )
             task_id = cursor.fetchone()[0]
         else:
             cursor.execute(
-                'INSERT INTO parse_tasks(mode, source_type, source_value, status, created_by) '
-                'VALUES (?, ?, ?, ?, ?)',
+                'INSERT INTO parse_tasks(mode, source_type, source_value, status, created_by, meta_json) '
+                'VALUES (?, ?, ?, ?, ?, ?)',
                 (
                     str(mode or 'members').strip(),
                     str(source_type or 'chat').strip(),
                     str(source_value or '').strip(),
                     str(status or 'draft').strip(),
                     created_by,
+                    meta_text,
                 ),
             )
             task_id = cursor.lastrowid
@@ -1398,6 +1415,30 @@ def update_parse_task_progress(task_id, found=None, saved=None, skipped=None, er
     if errors is not None:
         assignments.append(f'total_errors = {"%s" if IS_POSTGRES else "?"}')
         values.append(int(errors or 0))
+    if not assignments:
+        return get_parse_task(task_id)
+    values.append(task_id)
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        sql_text = f'UPDATE parse_tasks SET {", ".join(assignments)} WHERE id = {"%s" if IS_POSTGRES else "?"}'
+        cursor.execute(sql_text, tuple(values))
+        conn.commit()
+        cursor.close()
+    return get_parse_task(task_id)
+
+
+def update_parse_task_details(task_id, source_report_json=None, last_error=None, meta_json=None):
+    assignments = []
+    values = []
+    if source_report_json is not None:
+        assignments.append(f'source_report_json = {"%s" if IS_POSTGRES else "?"}')
+        values.append(_json_text(source_report_json, default='[]'))
+    if last_error is not None:
+        assignments.append(f'last_error = {"%s" if IS_POSTGRES else "?"}')
+        values.append(str(last_error or '').strip())
+    if meta_json is not None:
+        assignments.append(f'meta_json = {"%s" if IS_POSTGRES else "?"}')
+        values.append(_json_text(meta_json, default='{}'))
     if not assignments:
         return get_parse_task(task_id)
     values.append(task_id)
@@ -1584,6 +1625,16 @@ def get_audience_user_by_tg_id(telegram_user_id):
     )
 
 
+def get_audience_user_by_username(username):
+    value = str(username or '').strip().lstrip('@').lower()
+    if value == '':
+        return None
+    return _get_audience_user_by_clause(
+        f'LOWER(COALESCE(u.username, \'\')) = {"%s" if IS_POSTGRES else "?"}',
+        [value],
+    )
+
+
 def upsert_audience_user(
     telegram_user_id,
     username='',
@@ -1599,9 +1650,131 @@ def upsert_audience_user(
     unsubscribed_at=None,
     consent_status='unknown',
 ):
-    if telegram_user_id in (None, ''):
-        raise ValueError('telegram_user_id is required')
+    username_value = str(username or '').strip().lstrip('@')
+    if telegram_user_id in (None, '') and username_value == '':
+        raise ValueError('telegram_user_id or username is required')
     tags_text = _json_text(tags_json, default='[]')
+    if telegram_user_id in (None, ''):
+        existing = get_audience_user_by_username(username_value)
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            if existing:
+                if IS_POSTGRES:
+                    cursor.execute(
+                        'UPDATE audience_users SET '
+                        'username = COALESCE(NULLIF(%s, \'\'), username), '
+                        'first_name = COALESCE(NULLIF(%s, \'\'), first_name), '
+                        'last_name = COALESCE(NULLIF(%s, \'\'), last_name), '
+                        'phone_hash = COALESCE(NULLIF(%s, \'\'), phone_hash), '
+                        'source_id = COALESCE(%s, source_id), '
+                        'parse_task_id = COALESCE(%s, parse_task_id), '
+                        'discovered_via = COALESCE(NULLIF(%s, \'\'), discovered_via), '
+                        'discovered_at = COALESCE(%s, discovered_at), '
+                        'tags_json = COALESCE(NULLIF(%s, \'\'), tags_json), '
+                        'is_blacklisted = %s, '
+                        'unsubscribed_at = COALESCE(%s, unsubscribed_at), '
+                        'consent_status = COALESCE(NULLIF(%s, \'\'), consent_status), '
+                        'updated_at = NOW() WHERE id = %s',
+                        (
+                            username_value,
+                            str(first_name or '').strip(),
+                            str(last_name or '').strip(),
+                            str(phone_hash or '').strip(),
+                            source_id,
+                            parse_task_id,
+                            str(discovered_via or '').strip(),
+                            discovered_at,
+                            tags_text,
+                            bool(is_blacklisted),
+                            unsubscribed_at,
+                            str(consent_status or 'unknown').strip(),
+                            existing['id'],
+                        ),
+                    )
+                else:
+                    cursor.execute(
+                        'UPDATE audience_users SET '
+                        'username = COALESCE(NULLIF(?, \'\'), username), '
+                        'first_name = COALESCE(NULLIF(?, \'\'), first_name), '
+                        'last_name = COALESCE(NULLIF(?, \'\'), last_name), '
+                        'phone_hash = COALESCE(NULLIF(?, \'\'), phone_hash), '
+                        'source_id = COALESCE(?, source_id), '
+                        'parse_task_id = COALESCE(?, parse_task_id), '
+                        'discovered_via = COALESCE(NULLIF(?, \'\'), discovered_via), '
+                        'discovered_at = COALESCE(?, discovered_at), '
+                        'tags_json = COALESCE(NULLIF(?, \'\'), tags_json), '
+                        'is_blacklisted = ?, '
+                        'unsubscribed_at = COALESCE(?, unsubscribed_at), '
+                        'consent_status = COALESCE(NULLIF(?, \'\'), consent_status), '
+                        'updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+                        (
+                            username_value,
+                            str(first_name or '').strip(),
+                            str(last_name or '').strip(),
+                            str(phone_hash or '').strip(),
+                            source_id,
+                            parse_task_id,
+                            str(discovered_via or '').strip(),
+                            discovered_at,
+                            tags_text,
+                            _normalize_bool(is_blacklisted),
+                            unsubscribed_at,
+                            str(consent_status or 'unknown').strip(),
+                            existing['id'],
+                        ),
+                    )
+                conn.commit()
+                cursor.close()
+                return get_audience_user(existing['id'])
+            if IS_POSTGRES:
+                cursor.execute(
+                    'INSERT INTO audience_users('
+                    'telegram_user_id, username, first_name, last_name, phone_hash, source_id, parse_task_id, '
+                    'discovered_via, discovered_at, tags_json, is_blacklisted, unsubscribed_at, consent_status'
+                    ') VALUES (%s, %s, %s, %s, %s, %s, %s, %s, COALESCE(%s, NOW()), %s, %s, %s, %s) RETURNING id',
+                    (
+                        None,
+                        username_value,
+                        str(first_name or '').strip(),
+                        str(last_name or '').strip(),
+                        str(phone_hash or '').strip(),
+                        source_id,
+                        parse_task_id,
+                        str(discovered_via or '').strip(),
+                        discovered_at,
+                        tags_text,
+                        bool(is_blacklisted),
+                        unsubscribed_at,
+                        str(consent_status or 'unknown').strip(),
+                    ),
+                )
+                user_id = cursor.fetchone()[0]
+            else:
+                cursor.execute(
+                    'INSERT INTO audience_users('
+                    'telegram_user_id, username, first_name, last_name, phone_hash, source_id, parse_task_id, '
+                    'discovered_via, discovered_at, tags_json, is_blacklisted, unsubscribed_at, consent_status'
+                    ') VALUES (?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP), ?, ?, ?, ?)',
+                    (
+                        None,
+                        username_value,
+                        str(first_name or '').strip(),
+                        str(last_name or '').strip(),
+                        str(phone_hash or '').strip(),
+                        source_id,
+                        parse_task_id,
+                        str(discovered_via or '').strip(),
+                        discovered_at,
+                        tags_text,
+                        _normalize_bool(is_blacklisted),
+                        unsubscribed_at,
+                        str(consent_status or 'unknown').strip(),
+                    ),
+                )
+                user_id = cursor.lastrowid
+            conn.commit()
+            cursor.close()
+        return get_audience_user(user_id)
     with get_connection() as conn:
         cursor = conn.cursor()
         if IS_POSTGRES:
@@ -1625,7 +1798,7 @@ def upsert_audience_user(
                 'updated_at = NOW()',
                 (
                     telegram_user_id,
-                    str(username or '').strip(),
+                    username_value,
                     str(first_name or '').strip(),
                     str(last_name or '').strip(),
                     str(phone_hash or '').strip(),
@@ -1660,7 +1833,7 @@ def upsert_audience_user(
                 'updated_at = CURRENT_TIMESTAMP',
                 (
                     telegram_user_id,
-                    str(username or '').strip(),
+                    username_value,
                     str(first_name or '').strip(),
                     str(last_name or '').strip(),
                     str(phone_hash or '').strip(),

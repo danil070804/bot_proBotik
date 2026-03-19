@@ -74,6 +74,47 @@ def build_entity_card(title, fields, path=None, footer=None):
     return '\n'.join(lines)
 
 
+def build_status_screen(title, stats=None, highlights=None, path=None, footer=None):
+    lines = []
+    if path:
+        lines.append(escape(str(path)))
+        lines.append('')
+    lines.append(f'<b>{escape(str(title))}</b>')
+    if stats:
+        lines.append('')
+        for field in stats:
+            label = escape(str(field[0]))
+            value = _value_text(field[1], style='bold')
+            suffix = escape(str(field[2])) if len(field) > 2 and field[2] else ''
+            lines.append(f'{label}: {value}{suffix}')
+    if highlights:
+        lines.append('')
+        for item in highlights:
+            lines.append(f'• {escape(str(item))}')
+    if footer:
+        lines.append('')
+        lines.append(escape(str(footer)))
+    return '\n'.join(lines)
+
+
+def build_confirm_screen(title, summary=None, confirm_label='Подтвердить', cancel_label='Отмена', path=None):
+    lines = []
+    if path:
+        lines.append(escape(str(path)))
+        lines.append('')
+    lines.append(f'<b>{escape(str(title))}</b>')
+    if summary:
+        lines.append('')
+        if isinstance(summary, (list, tuple)):
+            for item in summary:
+                lines.append(f'• {escape(str(item))}')
+        else:
+            lines.append(escape(str(summary)))
+    lines.append('')
+    lines.append(f'Действия: {escape(str(confirm_label))} / {escape(str(cancel_label))}')
+    return '\n'.join(lines)
+
+
 def build_inline_keyboard(rows):
     keyboard = types.InlineKeyboardMarkup()
     for row in rows:

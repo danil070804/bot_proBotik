@@ -2,8 +2,15 @@ from dataclasses import asdict, dataclass
 from urllib.parse import urlparse
 
 
-INVITE_TYPE = 'invite_hash'
-PUBLIC_TYPE = 'public_username'
+PRIVATE_INVITE_TYPE = 'private_invite'
+JOINCHAT_INVITE_TYPE = 'joinchat_invite'
+PUBLIC_USERNAME_TYPE = 'public_username'
+PUBLIC_LINK_TYPE = 'public_link'
+
+# Backward-compatible alias used in older join-target flow.
+INVITE_TYPE = PRIVATE_INVITE_TYPE
+PUBLIC_TYPE = PUBLIC_USERNAME_TYPE
+INVITE_TYPES = {PRIVATE_INVITE_TYPE, JOINCHAT_INVITE_TYPE}
 
 
 @dataclass(frozen=True)
@@ -49,6 +56,10 @@ def extract_invite_hash(raw_target):
     return ''
 
 
+def is_invite_target_type(target_type):
+    return str(target_type or '').strip() in INVITE_TYPES
+
+
 def _looks_like_invite_target(raw_target):
     text = _strip_url_prefix(raw_target)
     lower = text.lower()
@@ -64,9 +75,24 @@ def _looks_like_invite_target(raw_target):
 
 
 def detect_target_type(raw_target):
-    if extract_invite_hash(raw_target):
-        return INVITE_TYPE
-    return PUBLIC_TYPE
+    raw_value = str(raw_target or '').strip()
+    if not raw_value:
+        return PUBLIC_USERNAME_TYPE
+    text = _strip_url_prefix(raw_value)
+    lower = text.lower()
+    invite_hash = extract_invite_hash(raw_value)
+    if invite_hash:
+        if lower.startswith('http://') or lower.startswith('https://'):
+            parsed = urlparse(text)
+            path = str(parsed.path or '').strip('/')
+            if path.lower().startswith('joinchat/'):
+                return JOINCHAT_INVITE_TYPE
+        if lower.startswith('tg://join?invite='):
+            return JOINCHAT_INVITE_TYPE
+        return PRIVATE_INVITE_TYPE
+    if lower.startswith('http://') or lower.startswith('https://') or lower.startswith('t.me/') or lower.startswith('telegram.me/'):
+        return PUBLIC_LINK_TYPE
+    return PUBLIC_USERNAME_TYPE
 
 
 def _normalize_public_target(raw_target):
@@ -93,9 +119,10 @@ def parse_target(raw_target):
         raise ValueError('Target is empty')
     invite_hash = extract_invite_hash(raw_value)
     if invite_hash:
+        target_type = detect_target_type(raw_value)
         return ParsedTarget(
             raw_target=raw_value,
-            target_type=INVITE_TYPE,
+            target_type=target_type,
             normalized_value=invite_hash,
             display_value=raw_value,
             join_method='ImportChatInviteRequest',
@@ -103,10 +130,15 @@ def parse_target(raw_target):
     if _looks_like_invite_target(raw_value):
         raise ValueError('Invite hash is empty')
     username = _normalize_public_target(raw_value)
+    target_type = detect_target_type(raw_value)
     return ParsedTarget(
         raw_target=raw_value,
-        target_type=PUBLIC_TYPE,
+        target_type=target_type,
         normalized_value=username,
         display_value='@' + username,
         join_method='JoinChannelRequest',
     )
+
+
+def normalize_target(raw_target):
+    return parse_target(raw_target)
