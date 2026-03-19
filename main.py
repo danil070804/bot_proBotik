@@ -208,160 +208,383 @@ def _bool_title(value):
 
 def _community_mode_title(mode):
 	return {
-		'invite_link': 'Invite Link',
-		'join_request': 'Join Request',
-		'auto': 'Auto',
+		'invite_link': 'Ссылка',
+		'join_request': 'Заявка',
+		'auto': 'Авто',
 	}.get(str(mode or '').strip(), str(mode or '-'))
+
+
+def _compact_dt(value):
+	if not value:
+		return '—'
+	text = str(value).replace('T', ' ').strip()
+	return text[:16] if len(text) > 16 else text
 
 
 def _main_dashboard_text():
 	try:
-		communities = COMMUNITY_REPO.list()
 		audience = AUDIENCE_REPO.summary()
 		parse_summary = PARSE_TASK_REPO.summary()
 		campaigns = CAMPAIGN_REPO.list()
-		join_pending = JOIN_REQUEST_REPO.list(status='pending', limit=1000)
-		running = len([c for c in campaigns if c.get('status') == 'running'])
-		scheduled = len([c for c in campaigns if c.get('status') == 'scheduled'])
+		active_tasks = parse_summary.get('running', 0) + len([c for c in campaigns if c.get('status') == 'running'])
 		return (
-			'🏠 <b>Invite Platform</b>\n\n'
-			f'🔑 Аккаунты: <b>{len(list_sessions())}</b>\n'
-			f'📡 Парсинг: задач=<b>{parse_summary.get("total", 0)}</b>, running=<b>{parse_summary.get("running", 0)}</b>, '
-			f'saved=<b>{parse_summary.get("total_saved", 0)}</b>\n'
-			f'📂 Сообщества: <b>{len(communities)}</b>\n'
-			f'👥 Аудитория: <b>{audience.get("total", 0)}</b> '
-			f'(active={audience.get("active", 0)}, blacklist={audience.get("blacklisted", 0)}, unsubscribed={audience.get("unsubscribed", 0)})\n'
-			f'🚀 Кампании: <b>{len(campaigns)}</b> '
-			f'(running={running}, scheduled={scheduled})\n'
-			f'📨 Заявки в ожидании: <b>{len(join_pending)}</b>\n\n'
-			'Новый основной pipeline:\n'
-			'<code>Парсинг -> Аудитория -> Кампания -> Invite Link -> Join Request -> Approval</code>'
+			'🏠 <b>Teddy Invite</b>\n\n'
+			f'Аккаунты: <b>{len(list_sessions())}</b> 🟢\n'
+			f'Аудитория: <b>{audience.get("total", 0)}</b>\n'
+			f'Активных задач: <b>{active_tasks}</b>\n\n'
+			'Выбери раздел:'
 		)
 	except Exception as e:
-		return f'🏠 <b>Invite Platform</b>\n\nНе удалось собрать dashboard: <code>{e}</code>'
+		return f'🏠 <b>Teddy Invite</b>\n\nНе удалось собрать экран: <code>{e}</code>'
 
 
 def _communities_text():
 	items = COMMUNITY_REPO.list()
-	lines = [
-		'📂 <b>Сообщества</b>',
-		f'Всего: <b>{len(items)}</b>',
-		'Добавляй чаты/каналы для кампаний, Invite Link и Join Request.',
-	]
-	if items:
-		lines.append('')
-		for item in items[:10]:
-			lines.append(
-				f'• <b>{item.get("title")}</b> '
-				f'(<code>{item.get("chat_id")}</code>) | тип={item.get("type")} | '
-				f'режим={_community_mode_title(item.get("default_invite_mode"))} | '
-				f'auto-approve={_bool_title(item.get("auto_approve_join_requests"))}'
-			)
-	return '\n'.join(lines)
+	active = len([item for item in items if item.get('is_active')])
+	return (
+		'📂 <b>Сообщества</b>\n\n'
+		f'Всего: <b>{len(items)}</b>\n'
+		f'Активные: <b>{active}</b>\n\n'
+		'Управление целевыми чатами.'
+	)
 
 
 def _audience_text():
 	summary = AUDIENCE_REPO.summary()
-	lines = [
-		'👥 <b>Аудитория</b>',
-		f'Всего пользователей: <b>{summary.get("total", 0)}</b>',
-		f'Активных: <b>{summary.get("active", 0)}</b>',
-		f'Blacklisted: <b>{summary.get("blacklisted", 0)}</b>',
-		f'Unsubscribed: <b>{summary.get("unsubscribed", 0)}</b>',
-		f'С username: <b>{summary.get("with_username", 0)}</b> | без username: <b>{summary.get("without_username", 0)}</b>',
-		f'Источников: <b>{summary.get("sources", 0)}</b>',
-		'Поддерживается парсинг, импорт CSV/JSON, поиск и сегменты.',
-	]
-	for item in AUDIENCE_REPO.list(limit=5):
-		lines.append(
-			f'• ID <code>{item.get("id")}</code> | tg=<code>{item.get("telegram_user_id")}</code> | '
-			f'@{item.get("username") or "-"} | {item.get("first_name") or "-"} | src={item.get("source_value") or "-"}'
-		)
-	return '\n'.join(lines)
+	return (
+		'👥 <b>Аудитория</b>\n\n'
+		f'Всего: <b>{summary.get("total", 0)}</b>\n'
+		f'Сегменты: <b>{len(SEGMENT_REPO.list(limit=1000))}</b>\n'
+		f'Blacklisted: <b>{summary.get("blacklisted", 0)}</b>\n\n'
+		'Управление базой пользователей.'
+	)
 
 
 def _campaigns_text():
 	items = CAMPAIGN_REPO.list()
-	status_map = {}
-	for item in items:
-		status = str(item.get('status') or 'draft')
-		status_map[status] = status_map.get(status, 0) + 1
-	lines = [
-		'🚀 <b>Кампании</b>',
-		f'Всего: <b>{len(items)}</b>',
-		f'draft={status_map.get("draft", 0)} | scheduled={status_map.get("scheduled", 0)} | running={status_map.get("running", 0)}',
-		f'paused={status_map.get("paused", 0)} | finished={status_map.get("finished", 0)} | failed={status_map.get("failed", 0)}',
-	]
-	for item in items[:8]:
-		lines.append(
-			f'• <b>{item.get("name")}</b> '
-			f'(ID {item.get("id")}) | status={item.get("status")} | '
-			f'mode={_community_mode_title(item.get("invite_mode"))}'
-		)
-	return '\n'.join(lines)
+	active = len([item for item in items if item.get('status') in ['running', 'scheduled']])
+	return (
+		'🚀 <b>Кампании</b>\n\n'
+		f'Активные: <b>{active}</b>\n'
+		f'Всего: <b>{len(items)}</b>\n\n'
+		'Запуск приглашений и рассылок.'
+	)
 
 
 def _join_requests_text(status='pending'):
-	items = JOIN_REQUEST_REPO.list(status=status, limit=20)
 	pending = len(JOIN_REQUEST_REPO.list(status='pending', limit=1000))
 	approved = len(JOIN_REQUEST_REPO.list(status='approved', limit=1000))
 	declined = len(JOIN_REQUEST_REPO.list(status='declined', limit=1000))
-	lines = [
-		'📨 <b>Заявки</b>',
-		f'pending=<b>{pending}</b> | approved=<b>{approved}</b> | declined=<b>{declined}</b>',
-		f'Текущий фильтр: <b>{status}</b>',
-	]
-	for item in items:
-		lines.append(
-			f'• ID <code>{item.get("id")}</code> | tg=<code>{item.get("telegram_user_id")}</code> | '
-			f'campaign={item.get("campaign_id") or "-"} | community={item.get("community_id") or "-"} | '
-			f'status={item.get("status")}'
-		)
-	return '\n'.join(lines)
+	return (
+		'📨 <b>Заявки</b>\n\n'
+		f'Ожидают: <b>{pending}</b>\n'
+		f'Одобрено: <b>{approved}</b>\n'
+		f'Отклонено: <b>{declined}</b>\n\n'
+		f'Фильтр: <b>{status}</b>'
+	)
 
 
 def _parsing_text():
 	parse_summary = PARSE_TASK_REPO.summary()
 	recent_tasks = PARSE_TASK_REPO.list(limit=5)
-	lines = [
-		'📡 <b>Парсинг аудитории</b>',
-		'Модуль парсинга работает как источник для сегментов и кампаний.',
-		'',
-		f'Задач: <b>{parse_summary.get("total", 0)}</b> | running=<b>{parse_summary.get("running", 0)}</b> | failed=<b>{parse_summary.get("failed", 0)}</b>',
-		f'Найдено: <b>{parse_summary.get("total_found", 0)}</b> | сохранено: <b>{parse_summary.get("total_saved", 0)}</b> | skipped=<b>{parse_summary.get("total_skipped", 0)}</b>',
-		f'Текущие лимиты: posts={_setting_int("parser_posts_limit")}, comments={_setting_int("parser_comments_limit")}, '
-		f'all_sessions={"ВКЛ" if _setting_bool("parser_use_all_sessions") else "ВЫКЛ"}',
-		'',
-		'Режимы: members / commenters / message_authors / import_file / manual_add',
-	]
-	for item in recent_tasks:
-		lines.append(
-			f'• #{item.get("id")} | mode={item.get("mode")} | status={item.get("status")} | '
-			f'saved={item.get("total_saved", 0)} / found={item.get("total_found", 0)}'
-		)
-	return '\n'.join(lines)
+	last_task = recent_tasks[0] if recent_tasks else None
+	active_tasks = int(parse_summary.get('running', 0) or 0) + int(parse_summary.get('queued', 0) or 0)
+	return (
+		'📡 <b>Парсинг</b>\n\n'
+		f'Активных задач: <b>{active_tasks}</b>\n'
+		f'Последний запуск: <b>{_compact_dt((last_task or {}).get("created_at") or (last_task or {}).get("started_at"))}</b>\n\n'
+		'Выбери режим:'
+	)
 
 
 def list_sessions():
 	return get_sessions()
 
 
+ACCOUNTS_PAGE_SIZE = 5
+AUDIENCE_PAGE_SIZE = 6
+CAMPAIGNS_PAGE_SIZE = 6
+
+
+def _page_total(total_items, page_size):
+	if total_items <= 0:
+		return 1
+	return max(1, (int(total_items) + int(page_size) - 1) // int(page_size))
+
+
+def _normalize_page(page, total_items, page_size):
+	try:
+		page = int(page)
+	except Exception:
+		page = 0
+	total_pages = _page_total(total_items, page_size)
+	if page < 0:
+		page = 0
+	if page >= total_pages:
+		page = total_pages - 1
+	return page, total_pages
+
+
+def _slice_page(items, page, page_size):
+	page, total_pages = _normalize_page(page, len(items), page_size)
+	start = page * page_size
+	end = start + page_size
+	return items[start:end], page, total_pages
+
+
+def _build_page_nav(prev_callback, next_callback, back_callback):
+	keyboard = types.InlineKeyboardMarkup()
+	keyboard.add(
+		types.InlineKeyboardButton(text='⬅️', callback_data=prev_callback),
+		types.InlineKeyboardButton(text='➡️', callback_data=next_callback),
+	)
+	keyboard.add(types.InlineKeyboardButton(text='⬅️ Назад', callback_data=back_callback))
+	return keyboard
+
+
+def _format_username(username):
+	value = str(username or '').strip().lstrip('@')
+	return f'@{value}' if value else '—'
+
+
+def _session_phone(session_name):
+	base = os.path.splitext(os.path.basename(str(session_name or '')))[0]
+	digits = ''
+	for ch in base:
+		if ch.isdigit():
+			digits += ch
+		elif digits:
+			break
+	return ('+' + digits) if digits else '—'
+
+
+def _session_username(details):
+	text = str(details or '').strip()
+	for part in text.replace(',', ' ').split():
+		if part.startswith('@') and len(part) > 1:
+			return part
+	return '—'
+
+
+def _account_rows():
+	rows = []
+	for index, session in enumerate(list_sessions()):
+		status, details, last_check = get_account_health(session)
+		rows.append(
+			{
+				'index': index,
+				'session': session,
+				'phone': _session_phone(session),
+				'username': _session_username(details),
+				'status': status,
+				'details': details,
+				'last_check': last_check,
+				'warmup': get_account_warmup_remaining(session),
+			}
+		)
+	return rows
+
+
+def _campaign_status_emoji(status):
+	return {
+		'running': '🟢',
+		'scheduled': '🟡',
+		'paused': '⏸',
+		'finished': '✅',
+		'failed': '🔴',
+		'cancelled': '⚫',
+		'draft': '⚪',
+	}.get(str(status or '').strip(), '⚪')
+
+
+def _audience_rows():
+	return AUDIENCE_REPO.list(limit=500)
+
+
+def _campaign_rows():
+	return CAMPAIGN_REPO.list()
+
+
+def _community_rows():
+	return COMMUNITY_REPO.list()
+
+
+def _accounts_text():
+	rows = _account_rows()
+	active = len([row for row in rows if row.get('status') == 'active'])
+	problems = len([row for row in rows if row.get('status') not in {'active', 'unknown'}])
+	return (
+		'🔑 <b>Аккаунты</b>\n\n'
+		f'Всего: <b>{len(rows)}</b>\n'
+		f'Активны: <b>{active}</b> 🟢\n'
+		f'Проблемы: <b>{problems}</b> 🔴\n\n'
+		'Управление аккаунтами и сессиями.'
+	)
+
+
+def _accounts_list_text(page=0):
+	rows = _account_rows()
+	items, page, total_pages = _slice_page(rows, page, ACCOUNTS_PAGE_SIZE)
+	lines = [f'📋 <b>Аккаунты · {page + 1}/{total_pages}</b>', '']
+	for local_idx, item in enumerate(items, start=1):
+		lines.append(f'{local_idx}. {_account_status_emoji(item.get("status"))} {item.get("phone")}')
+		lines.append(f'{item.get("username")}')
+		lines.append('')
+	return '\n'.join(lines).strip()
+
+
+def _build_accounts_list_keyboard(page=0):
+	rows = _account_rows()
+	items, page, total_pages = _slice_page(rows, page, ACCOUNTS_PAGE_SIZE)
+	keyboard = types.InlineKeyboardMarkup()
+	if items:
+		buttons = [
+			types.InlineKeyboardButton(text=str(local_idx), callback_data=f'account_open|{item.get("index")}|{page}')
+			for local_idx, item in enumerate(items, start=1)
+		]
+		keyboard.row(*buttons[:4])
+		if len(buttons) > 4:
+			keyboard.row(*buttons[4:8])
+	keyboard.add(
+		types.InlineKeyboardButton(text='⬅️', callback_data=f'accounts_list|{max(0, page - 1)}'),
+		types.InlineKeyboardButton(text='➡️', callback_data=f'accounts_list|{min(total_pages - 1, page + 1)}'),
+	)
+	keyboard.add(types.InlineKeyboardButton(text='⬅️ Назад', callback_data='accounts_menu'))
+	return keyboard
+
+
+def _account_card_text(account_index):
+	rows = _account_rows()
+	try:
+		item = rows[int(account_index)]
+	except Exception:
+		return 'Аккаунт не найден.'
+	last_check = item.get('last_check') or '—'
+	warmup = _fmt_seconds_ru(item.get('warmup')) if item.get('warmup') else '—'
+	return (
+		'👤 <b>Аккаунт</b>\n\n'
+		f'Телефон: <code>{item.get("phone")}</code>\n'
+		f'Username: <code>{item.get("username")}</code>\n'
+		f'Статус: {_account_status_emoji(item.get("status"))} <b>{_account_status_title(item.get("status"))}</b>\n'
+		f'Сессия: <code>{item.get("session")}</code>\n'
+		f'Проверка: <code>{last_check}</code>\n'
+		f'Прогрев: <code>{warmup}</code>'
+	)
+
+
+def _build_account_card_keyboard(account_index, page=0):
+	keyboard = types.InlineKeyboardMarkup()
+	keyboard.add(types.InlineKeyboardButton(text='🩺 Проверить', callback_data=f'account_check|{account_index}|{page}'))
+	keyboard.add(types.InlineKeyboardButton(text='🗑 Удалить', callback_data=f'account_delete|{account_index}|{page}'))
+	keyboard.add(types.InlineKeyboardButton(text='⬅️ Назад', callback_data=f'accounts_list|{page}'))
+	return keyboard
+
+
+def _audience_list_text(page=0):
+	rows = _audience_rows()
+	items, page, total_pages = _slice_page(rows, page, AUDIENCE_PAGE_SIZE)
+	lines = [f'👥 <b>Аудитория · {page + 1}/{total_pages}</b>', '']
+	for local_idx, item in enumerate(items, start=1):
+		name = item.get('first_name') or item.get('username') or item.get('telegram_user_id')
+		marker = '🚫' if item.get('is_blacklisted') else '🟢'
+		lines.append(f'{local_idx}. {marker} {name}')
+		lines.append(f'{_format_username(item.get("username"))} · {item.get("source_value") or "—"}')
+		lines.append('')
+	return '\n'.join(lines).strip()
+
+
+def _build_audience_list_keyboard(page=0):
+	rows = _audience_rows()
+	items, page, total_pages = _slice_page(rows, page, AUDIENCE_PAGE_SIZE)
+	keyboard = types.InlineKeyboardMarkup()
+	if items:
+		buttons = [
+			types.InlineKeyboardButton(text=str(local_idx), callback_data=f'audience_user|{item.get("id")}|{page}')
+			for local_idx, item in enumerate(items, start=1)
+		]
+		keyboard.row(*buttons[:4])
+		if len(buttons) > 4:
+			keyboard.row(*buttons[4:8])
+	keyboard.add(
+		types.InlineKeyboardButton(text='⬅️', callback_data=f'audience_list|{max(0, page - 1)}'),
+		types.InlineKeyboardButton(text='➡️', callback_data=f'audience_list|{min(total_pages - 1, page + 1)}'),
+	)
+	keyboard.add(types.InlineKeyboardButton(text='⬅️ Назад', callback_data='audience_menu'))
+	return keyboard
+
+
+def _campaigns_list_text(page=0):
+	rows = _campaign_rows()
+	items, page, total_pages = _slice_page(rows, page, CAMPAIGNS_PAGE_SIZE)
+	lines = [f'🚀 <b>Кампании · {page + 1}/{total_pages}</b>', '']
+	for local_idx, item in enumerate(items, start=1):
+		lines.append(f'{local_idx}. {_campaign_status_emoji(item.get("status"))} {item.get("name") or "Без названия"}')
+		lines.append(f'{item.get("status") or "draft"} · {_community_mode_title(item.get("invite_mode"))}')
+		lines.append('')
+	return '\n'.join(lines).strip()
+
+
+def _build_campaigns_list_keyboard(page=0):
+	rows = _campaign_rows()
+	items, page, total_pages = _slice_page(rows, page, CAMPAIGNS_PAGE_SIZE)
+	keyboard = types.InlineKeyboardMarkup()
+	if items:
+		buttons = [
+			types.InlineKeyboardButton(text=str(local_idx), callback_data=f'campaign_view|{item.get("id")}|{page}')
+			for local_idx, item in enumerate(items, start=1)
+		]
+		keyboard.row(*buttons[:4])
+		if len(buttons) > 4:
+			keyboard.row(*buttons[4:8])
+	keyboard.add(
+		types.InlineKeyboardButton(text='⬅️', callback_data=f'campaigns_list|{max(0, page - 1)}'),
+		types.InlineKeyboardButton(text='➡️', callback_data=f'campaigns_list|{min(total_pages - 1, page + 1)}'),
+	)
+	keyboard.add(types.InlineKeyboardButton(text='⬅️ Назад', callback_data='campaigns_menu'))
+	return keyboard
+
+
+def _communities_list_text(page=0):
+	rows = _community_rows()
+	items, page, total_pages = _slice_page(rows, page, CAMPAIGNS_PAGE_SIZE)
+	lines = [f'📂 <b>Сообщества · {page + 1}/{total_pages}</b>', '']
+	for local_idx, item in enumerate(items, start=1):
+		title = item.get('title') or item.get('chat_id') or 'Без названия'
+		active = '🟢' if item.get('is_active') else '⚫'
+		lines.append(f'{local_idx}. {active} {title}')
+		lines.append(f'{item.get("type") or "group"} · {_community_mode_title(item.get("default_invite_mode"))}')
+		lines.append('')
+	return '\n'.join(lines).strip()
+
+
+def _build_communities_list_keyboard(page=0):
+	rows = _community_rows()
+	_, page, total_pages = _slice_page(rows, page, CAMPAIGNS_PAGE_SIZE)
+	keyboard = types.InlineKeyboardMarkup()
+	keyboard.add(
+		types.InlineKeyboardButton(text='⬅️', callback_data=f'communities_list|{max(0, page - 1)}'),
+		types.InlineKeyboardButton(text='➡️', callback_data=f'communities_list|{min(total_pages - 1, page + 1)}'),
+	)
+	keyboard.add(types.InlineKeyboardButton(text='⬅️ Назад', callback_data='communities_menu'))
+	return keyboard
+
+
 def _account_status_emoji(status):
 	return {
 		'active': '🟢',
-		'limited': '🟠',
+		'limited': '🟡',
 		'dead': '🔴',
-		'unknown': '⚪',
-	}.get(status, '⚪')
+		'unknown': '⚫',
+	}.get(status, '⚫')
 
 
 def _account_status_title(status):
 	return {
-		'active': 'АКТИВЕН',
-		'limited': 'ОГРАНИЧЕН',
-		'dead': 'НЕРАБОЧИЙ',
-		'unknown': 'НЕИЗВЕСТНО',
-	}.get(status, 'НЕИЗВЕСТНО')
+		'active': 'Активен',
+		'limited': 'Ограничен',
+		'dead': 'Ошибка',
+		'unknown': 'Не активен',
+	}.get(status, 'Не активен')
 
 
 def _fmt_seconds_ru(total_seconds):
@@ -916,38 +1139,12 @@ def _send_html_chunks(chat_id, header, lines, chunk_size=3500):
 
 def _guide_text():
 	return (
-		'ℹ️ <b>Invite Platform</b>\n\n'
-		'🔑 <b>Аккаунты</b>\n'
-		'• Загружай <code>.session</code> или <code>.json</code> как документ.\n'
-		'• Аккаунты используются для парсинга и технических проверок доступности источников.\n'
-		'• Health-check и прогрев остаются отдельным служебным модулем.\n\n'
-		'📡 <b>Парсинг</b>\n'
-		'• Сбор аудитории из участников, комментариев и авторов сообщений.\n'
-		'• Парсинг не ведёт в direct add member, а пополняет аудиторию для кампаний.\n'
-		'• Поддерживаются live-progress и повторный запуск задач.\n\n'
-		'👥 <b>Аудитория</b>\n'
-		'• Ручное добавление пользователей.\n'
-		'• Импорт своей базы через CSV/JSON.\n'
-		'• Хранение результатов парсинга, blacklist и unsubscribe.\n\n'
-		'📂 <b>Сообщества</b>\n'
-		'• Хранят Telegram chat_id, тип сообщества, default mode и auto-approve.\n'
-		'• Используются как цель для invite-link и join-request кампаний.\n\n'
-		'🚀 <b>Кампании</b>\n'
-		'• Создаются поверх аудитории и сообщества.\n'
-		'• Режимы: <code>invite_link</code>, <code>join_request</code>, <code>auto</code>.\n'
-		'• Worker отправляет сообщения со ссылкой, а не делает direct add member.\n\n'
-		'📨 <b>Заявки</b>\n'
-		'• Telegram webhook принимает <code>chat_join_request</code>.\n'
-		'• Заявки сохраняются в БД и могут быть auto-approve или manual approve/decline.\n\n'
-		'📊 <b>Аналитика</b>\n'
-		'• Данные берутся из <code>campaign_recipients</code> и <code>join_requests</code>.\n'
-		'• Основные метрики: sent, failed, join_requested, approved, joined, declined.\n\n'
-		'⚙️ <b>Настройки</b>\n'
-		'• Rate limit per minute/hour.\n'
-		'• Max attempts.\n'
-		'• Stop on error rate.\n'
-		'• Отдельно доступны управление сессиями и процессами как служебные инструменты.\n\n'
-		'💡 <b>Подсказка:</b> на любом шаге нажми «❌ Отменить сценарий» или «⬅️ Назад в меню».'
+		'ℹ️ <b>Помощь</b>\n\n'
+		'1. Добавь аккаунты.\n'
+		'2. Собери аудиторию через парсинг или импорт.\n'
+		'3. Создай сообщество и кампанию.\n'
+		'4. Следи за заявками и аналитикой.\n\n'
+		'На любом шаге можно нажать «❌ Отменить сценарий».'
 	)
 
 
@@ -1121,44 +1318,42 @@ def _apply_preset(name):
 
 def _settings_text():
 	return (
-		'⚙️ Настройки платформы\n'
-		f'• Активный пресет: <b>{_preset_title(_get_setting("active_preset"))}</b>\n'
-		f'• Парсинг: posts={_setting_int("parser_posts_limit")}, comments={_setting_int("parser_comments_limit")}, '
-		f'all_sessions={"ВКЛ" if _setting_bool("parser_use_all_sessions") else "ВЫКЛ"}\n'
-		f'• Rate limit: {_setting_int("campaign_rate_limit_per_minute")}/мин, {_setting_int("campaign_rate_limit_per_hour")}/час\n'
-		f'• Max attempts: {_setting_int("campaign_max_attempts")}\n'
-		f'• Stop on error rate: {_get_setting("campaign_stop_on_error_rate")}\n'
-		f'• Прогрев аккаунтов: {_setting_int("account_warmup_days")} дн.'
+		'⚙️ <b>Настройки</b>\n\n'
+		f'Пресет: <b>{_preset_title(_get_setting("active_preset"))}</b>\n'
+		f'Парсинг: <b>{_setting_int("parser_posts_limit")}</b> постов / <b>{_setting_int("parser_comments_limit")}</b> комм.\n'
+		f'Rate limit: <b>{_setting_int("campaign_rate_limit_per_minute")}</b>/мин\n'
+		f'Max attempts: <b>{_setting_int("campaign_max_attempts")}</b>\n'
+		f'Прогрев: <b>{_setting_int("account_warmup_days")}</b> дн.'
 	)
 
 
 def _build_settings_menu():
 	keyboard = types.InlineKeyboardMarkup()
-	keyboard.add(types.InlineKeyboardButton(text='🛡 Пресет: Супер-щадящий', callback_data='settings_preset|super_safe'))
 	keyboard.add(
-		types.InlineKeyboardButton(text='🟢 Пресет: Мягкий', callback_data='settings_preset|soft'),
-		types.InlineKeyboardButton(text='🟡 Пресет: Стандарт', callback_data='settings_preset|standard'),
-	)
-	keyboard.add(types.InlineKeyboardButton(text='🔴 Пресет: Агрессивный', callback_data='settings_preset|aggressive'))
-	keyboard.add(
-		types.InlineKeyboardButton(text='✏️ Посты парсинга', callback_data='settings_edit|parser_posts_limit'),
-		types.InlineKeyboardButton(text='✏️ Комментарии', callback_data='settings_edit|parser_comments_limit'),
+		types.InlineKeyboardButton(text='🛡 Safe', callback_data='settings_preset|super_safe'),
+		types.InlineKeyboardButton(text='🟢 Soft', callback_data='settings_preset|soft'),
 	)
 	keyboard.add(
-		types.InlineKeyboardButton(text='🔁 Все аккаунты парсинга', callback_data='settings_toggle|parser_use_all_sessions'),
-		types.InlineKeyboardButton(text='✏️ Лимит / мин', callback_data='settings_edit|campaign_rate_limit_per_minute'),
+		types.InlineKeyboardButton(text='🟡 Standard', callback_data='settings_preset|standard'),
+		types.InlineKeyboardButton(text='🔴 Aggro', callback_data='settings_preset|aggressive'),
 	)
 	keyboard.add(
-		types.InlineKeyboardButton(text='✏️ Лимит / час', callback_data='settings_edit|campaign_rate_limit_per_hour'),
-		types.InlineKeyboardButton(text='✏️ Max attempts', callback_data='settings_edit|campaign_max_attempts'),
+		types.InlineKeyboardButton(text='✏️ Посты', callback_data='settings_edit|parser_posts_limit'),
+		types.InlineKeyboardButton(text='✏️ Комменты', callback_data='settings_edit|parser_comments_limit'),
 	)
-	keyboard.add(types.InlineKeyboardButton(text='✏️ Error-rate', callback_data='settings_edit|campaign_stop_on_error_rate'))
-	keyboard.add(types.InlineKeyboardButton(text='🕒 Дни прогрева аккаунтов', callback_data='settings_edit|account_warmup_days'))
 	keyboard.add(
-		types.InlineKeyboardButton(text='🧩 Аккаунты', callback_data='accounts_menu'),
-		types.InlineKeyboardButton(text='⚙️ Процессы', callback_data='manage_menu'),
+		types.InlineKeyboardButton(text='🔁 Все аккаунты', callback_data='settings_toggle|parser_use_all_sessions'),
+		types.InlineKeyboardButton(text='✏️ Лимит/мин', callback_data='settings_edit|campaign_rate_limit_per_minute'),
 	)
-	keyboard.add(types.InlineKeyboardButton(text='♻️ Сброс по умолчанию', callback_data='settings_reset'))
+	keyboard.add(
+		types.InlineKeyboardButton(text='✏️ Лимит/час', callback_data='settings_edit|campaign_rate_limit_per_hour'),
+		types.InlineKeyboardButton(text='✏️ Попытки', callback_data='settings_edit|campaign_max_attempts'),
+	)
+	keyboard.add(
+		types.InlineKeyboardButton(text='✏️ Error-rate', callback_data='settings_edit|campaign_stop_on_error_rate'),
+		types.InlineKeyboardButton(text='🕒 Прогрев', callback_data='settings_edit|account_warmup_days'),
+	)
+	keyboard.add(types.InlineKeyboardButton(text='♻️ Сброс', callback_data='settings_reset'))
 	keyboard.add(types.InlineKeyboardButton(text='⬅️ Назад', callback_data='main_menu'))
 	return keyboard
 
@@ -1169,6 +1364,7 @@ def _build_communities_menu():
 		types.InlineKeyboardButton(text='➕ Добавить', callback_data='community_add_start'),
 		types.InlineKeyboardButton(text='📋 Список', callback_data='communities_list'),
 	)
+	keyboard.add(types.InlineKeyboardButton(text='⚙️ Настройки', callback_data='settings_menu'))
 	keyboard.add(types.InlineKeyboardButton(text='⬅️ Назад', callback_data='main_menu'))
 	return keyboard
 
@@ -1177,7 +1373,7 @@ def _build_audience_menu():
 	keyboard = types.InlineKeyboardMarkup()
 	keyboard.add(
 		types.InlineKeyboardButton(text='➕ Добавить', callback_data='audience_add_start'),
-		types.InlineKeyboardButton(text='⬆️ Импорт CSV/JSON', callback_data='audience_import_start'),
+		types.InlineKeyboardButton(text='📂 Импорт', callback_data='audience_import_start'),
 	)
 	keyboard.add(
 		types.InlineKeyboardButton(text='📋 Список', callback_data='audience_list'),
@@ -1185,7 +1381,7 @@ def _build_audience_menu():
 	)
 	keyboard.add(
 		types.InlineKeyboardButton(text='🚫 Blacklist', callback_data='audience_blacklist_list'),
-		types.InlineKeyboardButton(text='🧩 Сегменты', callback_data='segments_menu'),
+		types.InlineKeyboardButton(text='🏷 Сегменты', callback_data='segments_menu'),
 	)
 	keyboard.add(types.InlineKeyboardButton(text='⬅️ Назад', callback_data='main_menu'))
 	return keyboard
@@ -1194,20 +1390,16 @@ def _build_audience_menu():
 def _build_parser_menu():
 	keyboard = types.InlineKeyboardMarkup()
 	keyboard.add(
-		types.InlineKeyboardButton(text='👥 Members', callback_data='parser_mode|members'),
-		types.InlineKeyboardButton(text='💬 Commenters', callback_data='parser_mode|commenters'),
+		types.InlineKeyboardButton(text='👥 Участники', callback_data='parser_mode|members'),
+		types.InlineKeyboardButton(text='💬 Комменты', callback_data='parser_mode|commenters'),
 	)
 	keyboard.add(
-		types.InlineKeyboardButton(text='✍️ Authors', callback_data='parser_mode|message_authors'),
-		types.InlineKeyboardButton(text='⬆️ Import File', callback_data='parser_mode|import_file'),
+		types.InlineKeyboardButton(text='📝 Авторы', callback_data='parser_mode|message_authors'),
+		types.InlineKeyboardButton(text='📂 Импорт', callback_data='parser_mode|import_file'),
 	)
 	keyboard.add(
-		types.InlineKeyboardButton(text='➕ Manual Add', callback_data='parser_mode|manual_add'),
-		types.InlineKeyboardButton(text='📈 Статус', callback_data='task_status'),
-	)
-	keyboard.add(
-		types.InlineKeyboardButton(text='⚙️ Настройки парсинга', callback_data='settings_menu'),
-		types.InlineKeyboardButton(text='👥 В аудиторию', callback_data='audience_menu'),
+		types.InlineKeyboardButton(text='➕ Вручную', callback_data='parser_mode|manual_add'),
+		types.InlineKeyboardButton(text='📋 Задачи', callback_data='task_status'),
 	)
 	keyboard.add(types.InlineKeyboardButton(text='⬅️ Назад', callback_data='main_menu'))
 	return keyboard
@@ -1216,8 +1408,8 @@ def _build_parser_menu():
 def _build_segments_menu():
 	keyboard = types.InlineKeyboardMarkup()
 	keyboard.add(
-		types.InlineKeyboardButton(text='➕ Создать сегмент', callback_data='segment_create_start'),
-		types.InlineKeyboardButton(text='📋 Список сегментов', callback_data='segments_list'),
+		types.InlineKeyboardButton(text='➕ Создать', callback_data='segment_create_start'),
+		types.InlineKeyboardButton(text='📋 Список', callback_data='segments_list'),
 	)
 	keyboard.add(types.InlineKeyboardButton(text='⬅️ Назад', callback_data='audience_menu'))
 	return keyboard
@@ -1229,6 +1421,7 @@ def _build_campaigns_menu():
 		types.InlineKeyboardButton(text='➕ Создать', callback_data='campaign_create_start'),
 		types.InlineKeyboardButton(text='📋 Список', callback_data='campaigns_list'),
 	)
+	keyboard.add(types.InlineKeyboardButton(text='📈 Статус', callback_data='task_status'))
 	keyboard.add(types.InlineKeyboardButton(text='⬅️ Назад', callback_data='main_menu'))
 	return keyboard
 
@@ -1236,11 +1429,11 @@ def _build_campaigns_menu():
 def _build_join_requests_menu():
 	keyboard = types.InlineKeyboardMarkup()
 	keyboard.add(
-		types.InlineKeyboardButton(text='🕒 Pending', callback_data='join_requests_view|pending'),
-		types.InlineKeyboardButton(text='✅ Approved', callback_data='join_requests_view|approved'),
+		types.InlineKeyboardButton(text='🕒 Ожидают', callback_data='join_requests_view|pending'),
+		types.InlineKeyboardButton(text='✅ Одобрено', callback_data='join_requests_view|approved'),
 	)
 	keyboard.add(
-		types.InlineKeyboardButton(text='❌ Declined', callback_data='join_requests_view|declined'),
+		types.InlineKeyboardButton(text='❌ Отклонено', callback_data='join_requests_view|declined'),
 		types.InlineKeyboardButton(text='🔁 Обновить', callback_data='join_requests_menu'),
 	)
 	keyboard.add(types.InlineKeyboardButton(text='⬅️ Назад', callback_data='main_menu'))
@@ -1258,11 +1451,11 @@ def _parse_yes_no(value):
 
 def _parser_mode_title(mode):
 	return {
-		'members': 'Members',
-		'commenters': 'Commenters',
-		'message_authors': 'Message Authors',
-		'import_file': 'Import File',
-		'manual_add': 'Manual Add',
+		'members': 'Участники',
+		'commenters': 'Комментаторы',
+		'message_authors': 'Авторы',
+		'import_file': 'Импорт',
+		'manual_add': 'Вручную',
 	}.get(str(mode or '').strip(), str(mode or '-'))
 
 
@@ -1305,17 +1498,17 @@ def _segment_detail_text(segment_id):
 	)
 
 
-def _build_campaign_actions(campaign_id):
+def _build_campaign_actions(campaign_id, page=0):
 	keyboard = types.InlineKeyboardMarkup()
 	keyboard.add(
-		types.InlineKeyboardButton(text='▶️ Запланировать', callback_data=f'campaign_start|{campaign_id}'),
-		types.InlineKeyboardButton(text='⏸ Пауза', callback_data=f'campaign_pause|{campaign_id}'),
+		types.InlineKeyboardButton(text='▶️ Запустить', callback_data=f'campaign_start|{campaign_id}|{page}'),
+		types.InlineKeyboardButton(text='⏸ Пауза', callback_data=f'campaign_pause|{campaign_id}|{page}'),
 	)
 	keyboard.add(
-		types.InlineKeyboardButton(text='🔄 Возобновить', callback_data=f'campaign_resume|{campaign_id}'),
-		types.InlineKeyboardButton(text='🛑 Отменить', callback_data=f'campaign_cancel|{campaign_id}'),
+		types.InlineKeyboardButton(text='🔄 Возобновить', callback_data=f'campaign_resume|{campaign_id}|{page}'),
+		types.InlineKeyboardButton(text='🛑 Отменить', callback_data=f'campaign_cancel|{campaign_id}|{page}'),
 	)
-	keyboard.add(types.InlineKeyboardButton(text='⬅️ Назад', callback_data='campaigns_menu'))
+	keyboard.add(types.InlineKeyboardButton(text='⬅️ Назад', callback_data=f'campaigns_list|{page}'))
 	return keyboard
 
 
@@ -1326,31 +1519,31 @@ def _campaign_detail_text(campaign_id):
 	stats = CAMPAIGN_REPO.get_stats(campaign_id)
 	community = COMMUNITY_REPO.get(campaign.get('community_id'))
 	return (
-		f'🚀 <b>{campaign.get("name")}</b>\n'
-		f'ID: <code>{campaign_id}</code>\n'
-		f'Статус: <b>{campaign.get("status")}</b>\n'
+		f'🚀 <b>Кампания</b>\n\n'
+		f'Название: <b>{campaign.get("name")}</b>\n'
+		f'Статус: {_campaign_status_emoji(campaign.get("status"))} <b>{campaign.get("status")}</b>\n'
 		f'Сообщество: <b>{(community or {}).get("title", "-")}</b>\n'
 		f'Режим: <b>{_community_mode_title(campaign.get("invite_mode"))}</b>\n'
-		f'Rate: {campaign.get("rate_limit_per_minute")}/мин, {campaign.get("rate_limit_per_hour")}/час\n'
-		f'Max attempts: {campaign.get("max_attempts")}\n\n'
-		f'Получателей: <b>{stats.get("total", 0)}</b>\n'
-		f'sent={stats.get("sent", 0)} | failed={stats.get("failed", 0)} | '
-		f'join_requested={stats.get("join_requested", 0)}\n'
-		f'approved={stats.get("approved", 0)} | joined={stats.get("joined", 0)} | declined={stats.get("declined", 0)}'
+		f'Rate: <code>{campaign.get("rate_limit_per_minute")}/мин</code>\n\n'
+		f'Получатели: <b>{stats.get("total", 0)}</b>\n'
+		f'Отправлено: <b>{stats.get("sent", 0)}</b>\n'
+		f'Одобрено: <b>{stats.get("approved", 0)}</b>\n'
+		f'Вступили: <b>{stats.get("joined", 0)}</b>\n'
+		f'Ошибки: <b>{stats.get("failed", 0)}</b>'
 	)
 
 
-def _build_user_actions(user_id):
+def _build_user_actions(user_id, page=0):
 	user = AUDIENCE_REPO.get(user_id)
 	keyboard = types.InlineKeyboardMarkup()
 	keyboard.add(
 		types.InlineKeyboardButton(
 			text='✅ Убрать blacklist' if user and user.get('is_blacklisted') else '🚫 В blacklist',
-			callback_data=f'audience_toggle_blacklist|{user_id}'
+			callback_data=f'audience_toggle_blacklist|{user_id}|{page}'
 		),
-		types.InlineKeyboardButton(text='✉️ Unsubscribe', callback_data=f'audience_unsubscribe|{user_id}'),
+		types.InlineKeyboardButton(text='✉️ Unsubscribe', callback_data=f'audience_unsubscribe|{user_id}|{page}'),
 	)
-	keyboard.add(types.InlineKeyboardButton(text='⬅️ Назад', callback_data='audience_menu'))
+	keyboard.add(types.InlineKeyboardButton(text='⬅️ Назад', callback_data=f'audience_list|{page}'))
 	return keyboard
 
 
@@ -1359,30 +1552,28 @@ def _user_detail_text(user_id):
 	if not user:
 		return 'Пользователь не найден.'
 	return (
-		f'👤 <b>{user.get("first_name") or "-"}</b>\n'
-		f'ID: <code>{user.get("id")}</code>\n'
-		f'Telegram ID: <code>{user.get("telegram_user_id")}</code>\n'
-		f'Username: <code>@{user.get("username") or "-"}</code>\n'
-		f'Source: <code>{user.get("source_value") or "-"}</code>\n'
-		f'Discovered via: <code>{user.get("discovered_via") or "-"}</code>\n'
-		f'Consent: <b>{user.get("consent_status") or "-"}</b>\n'
-		f'Blacklisted: <b>{_bool_title(user.get("is_blacklisted"))}</b>\n'
-		f'Unsubscribed: <b>{"Да" if user.get("unsubscribed_at") else "Нет"}</b>'
+		'👤 <b>Пользователь</b>\n\n'
+		f'Имя: <b>{user.get("first_name") or "-"}</b>\n'
+		f'TG ID: <code>{user.get("telegram_user_id")}</code>\n'
+		f'Username: <code>{_format_username(user.get("username"))}</code>\n'
+		f'Источник: <code>{user.get("source_value") or "-"}</code>\n'
+		f'Режим: <code>{user.get("discovered_via") or "-"}</code>\n'
+		f'Согласие: <b>{user.get("consent_status") or "-"}</b>\n'
+		f'В blacklist: <b>{_bool_title(user.get("is_blacklisted"))}</b>\n'
+		f'Отписка: <b>{"Да" if user.get("unsubscribed_at") else "Нет"}</b>'
 	)
 
 
 def _segments_text():
 	items = SEGMENT_REPO.list(limit=20)
 	lines = [
-		'🧩 <b>Сегменты</b>',
+		'🏷 <b>Сегменты</b>',
 		f'Всего: <b>{len(items)}</b>',
-		'Фильтры сегментов сейчас строятся поверх аудитории: search/source/tag/blacklist/active.',
+		'Группы аудитории для кампаний.',
 	]
-	for item in items[:8]:
+	for item in items[:5]:
 		user_count = len(SEGMENT_REPO.get_users(item.get('id'), limit=500))
-		lines.append(
-			f'• <b>{item.get("name")}</b> | id=<code>{item.get("id")}</code> | preview≤500=<b>{user_count}</b>'
-		)
+		lines.append(f'• <b>{item.get("name")}</b> — <b>{user_count}</b>')
 	return '\n'.join(lines)
 
 
@@ -1397,15 +1588,14 @@ def _build_manage_menu():
 def _build_accounts_menu():
 	keyboard = types.InlineKeyboardMarkup()
 	keyboard.add(
-		types.InlineKeyboardButton(text='📄 Список аккаунтов', callback_data='accounts_list'),
-		types.InlineKeyboardButton(text='🔍 Проверить аккаунты', callback_data='accounts_check_all'),
+		types.InlineKeyboardButton(text='➕ Добавить', callback_data='accounts_upload_help'),
+		types.InlineKeyboardButton(text='📋 Список', callback_data='accounts_list|0'),
 	)
 	keyboard.add(
-		types.InlineKeyboardButton(text='➕ Ввести аккаунты в цель', callback_data='accounts_join_target_start'),
+		types.InlineKeyboardButton(text='🩺 Проверка', callback_data='accounts_check_all'),
+		types.InlineKeyboardButton(text='🎯 В цель', callback_data='accounts_join_target_start'),
 	)
-	keyboard.add(
-		types.InlineKeyboardButton(text='🗑 Удалить аккаунт', callback_data='accounts_delete_menu'),
-	)
+	keyboard.add(types.InlineKeyboardButton(text='🗑 Удалить', callback_data='accounts_list|0'))
 	keyboard.add(types.InlineKeyboardButton(text='⬅️ Назад', callback_data='main_menu'))
 	return keyboard
 
@@ -1434,29 +1624,51 @@ def _stats_text():
 			status = str(row.get('status') or 'pending')
 			jr_status[status] = jr_status.get(status, 0) + 1
 		audience = AUDIENCE_REPO.summary()
+		total_campaigns = len(campaigns)
+		total_requests = len(join_requests)
+		conversion = 0
+		if total_stats.get('sent', 0):
+			conversion = round((total_stats.get('approved', 0) + total_stats.get('joined', 0)) * 100 / max(1, total_stats.get('sent', 0)))
 		return (
-			f'📊 <b>Аналитика платформы</b>\n'
-			f'Аккаунтов: <b>{len(list_sessions())}</b>\n'
-			f'Парсинг: tasks=<b>{parse_summary.get("total", 0)}</b>, running=<b>{parse_summary.get("running", 0)}</b>, '
-			f'found=<b>{parse_summary.get("total_found", 0)}</b>, saved=<b>{parse_summary.get("total_saved", 0)}</b>, '
-			f'errors=<b>{parse_summary.get("total_errors", 0)}</b>\n'
-			f'Сообществ: <b>{len(COMMUNITY_REPO.list())}</b>\n'
-			f'Пользователей: <b>{audience.get("total", 0)}</b>\n'
-			f'Кампаний: <b>{len(campaigns)}</b>\n'
-			f'Получателей: <b>{total_stats.get("total", 0)}</b>\n\n'
-			f'✉️ sent: <b>{total_stats.get("sent", 0)}</b>\n'
-			f'📬 delivered: <b>{total_stats.get("delivered", 0)}</b>\n'
-			f'🕒 join_requested: <b>{total_stats.get("join_requested", 0)}</b>\n'
-			f'✅ approved: <b>{total_stats.get("approved", 0)}</b>\n'
-			f'👤 joined: <b>{total_stats.get("joined", 0)}</b>\n'
-			f'❌ declined: <b>{total_stats.get("declined", 0)}</b>\n'
-			f'⚠️ failed: <b>{total_stats.get("failed", 0)}</b>\n\n'
-			f'Join requests: pending=<b>{jr_status.get("pending", 0)}</b>, '
-			f'approved=<b>{jr_status.get("approved", 0)}</b>, '
-			f'declined=<b>{jr_status.get("declined", 0)}</b>'
+			'📊 <b>Аналитика</b>\n\n'
+			f'Аудитория: <b>{audience.get("total", 0)}</b>\n'
+			f'Кампании: <b>{total_campaigns}</b>\n'
+			f'Заявки: <b>{total_requests}</b>\n'
+			f'Конверсия: <b>{conversion}%</b>\n\n'
+			f'Парсинг: <b>{parse_summary.get("total_saved", 0)}</b> сохранено\n'
+			f'Отправлено: <b>{total_stats.get("sent", 0)}</b>\n'
+			f'Одобрено: <b>{total_stats.get("approved", 0)}</b>\n'
+			f'Вступили: <b>{total_stats.get("joined", 0)}</b>\n'
+			f'Ожидают: <b>{jr_status.get("pending", 0)}</b>'
 		)
 	except Exception as e:
 		return f'Не удалось собрать аналитику: {e}'
+
+
+def _status_text():
+	parse_summary = PARSE_TASK_REPO.summary()
+	campaigns = CAMPAIGN_REPO.list()
+	active_campaigns = len([item for item in campaigns if item.get('status') in ['running', 'scheduled']])
+	pending_requests = len(JOIN_REQUEST_REPO.list(status='pending', limit=1000))
+	audience = AUDIENCE_REPO.summary()
+	return (
+		'📈 <b>Статус системы</b>\n\n'
+		f'Аккаунты: <b>{len(list_sessions())}</b> 🟢\n'
+		f'Парсинг: <b>{parse_summary.get("running", 0) + parse_summary.get("queued", 0)}</b> задачи\n'
+		f'Кампании: <b>{active_campaigns}</b> активны\n'
+		f'Заявки: <b>{pending_requests}</b> ожидают\n'
+		f'База: <b>{audience.get("total", 0)}</b>'
+	)
+
+
+def _build_status_menu():
+	keyboard = types.InlineKeyboardMarkup()
+	keyboard.add(
+		types.InlineKeyboardButton(text='🔄 Обновить', callback_data='task_status'),
+		types.InlineKeyboardButton(text='⚙️ Процессы', callback_data='manage_menu'),
+	)
+	keyboard.add(types.InlineKeyboardButton(text='⬅️ Назад', callback_data='main_menu'))
+	return keyboard
 
 
 @bot.message_handler(commands=['start'])
@@ -1486,12 +1698,6 @@ def start_message(message):
 					q.execute('UPDATE ugc_users SET ref_colvo = ref_colvo + 1 WHERE id = %s', (message.text[7:],))
 					connection.commit()
 					bot.send_message(message.text[7:], f'➕ Новый партнер: @{message.from_user.username}',reply_markup=keyboards.main)
-
-			keyboard = types.InlineKeyboardMarkup()
-			keyboard.add(types.InlineKeyboardButton(text=f'''💢 Как работает сервис ?!''',url=f'https://telegra.ph/Informaciya-po-proektu-10-29'))
-			bot.send_message(message.chat.id,f'💡 Перед началом использования сервиса, пожалуйста, ознакомьтесь со статьей: https://telegra.ph/Informaciya-po-proektu-10-29',parse_mode='HTML',reply_markup=keyboard, disable_web_page_preview=True)
-
-		bot.send_message(message.chat.id, '👑 Добро пожаловать в <b>Teddy Invite Pro</b>.', parse_mode='HTML', reply_markup=keyboards.main)
 		bot.send_message(message.chat.id, _main_dashboard_text(), parse_mode='HTML', reply_markup=build_new_menu())
 
 @bot.message_handler(content_types=['text'])
@@ -2490,8 +2696,17 @@ def podcategors(call):
 		_render_inline(call.message.chat.id, call.message.message_id, _communities_text(), parse_mode='HTML', reply_markup=_build_communities_menu())
 		return
 
-	if call.data == 'communities_list':
-		_render_inline(call.message.chat.id, call.message.message_id, _communities_text(), parse_mode='HTML', reply_markup=_build_communities_menu())
+	if call.data == 'communities_list' or call.data.startswith('communities_list|'):
+		page = 0
+		if '|' in call.data:
+			page = call.data.split('|', 1)[1]
+		_render_inline(
+			call.message.chat.id,
+			call.message.message_id,
+			_communities_list_text(page),
+			parse_mode='HTML',
+			reply_markup=_build_communities_list_keyboard(page)
+		)
 		return
 
 	if call.data == 'community_add_start':
@@ -2563,14 +2778,17 @@ def podcategors(call):
 		)
 		return
 
-	if call.data == 'audience_list':
-		users = AUDIENCE_REPO.list(limit=12)
-		keyboard = types.InlineKeyboardMarkup()
-		for user in users:
-			label = f'👤 @{user.get("username") or user.get("telegram_user_id")} ({user.get("id")})'
-			keyboard.add(types.InlineKeyboardButton(text=label[:60], callback_data=f'audience_user|{user.get("id")}'))
-		keyboard.add(types.InlineKeyboardButton(text='⬅️ Назад', callback_data='audience_menu'))
-		_render_inline(call.message.chat.id, call.message.message_id, _audience_text(), parse_mode='HTML', reply_markup=keyboard)
+	if call.data == 'audience_list' or call.data.startswith('audience_list|'):
+		page = 0
+		if '|' in call.data:
+			page = call.data.split('|', 1)[1]
+		_render_inline(
+			call.message.chat.id,
+			call.message.message_id,
+			_audience_list_text(page),
+			parse_mode='HTML',
+			reply_markup=_build_audience_list_keyboard(page)
+		)
 		return
 
 	if call.data == 'audience_search_start':
@@ -2610,24 +2828,48 @@ def podcategors(call):
 		return
 
 	if call.data.startswith('audience_user|'):
-		user_id = int(call.data.split('|', 1)[1])
-		_render_inline(call.message.chat.id, call.message.message_id, _user_detail_text(user_id), parse_mode='HTML', reply_markup=_build_user_actions(user_id))
+		parts = call.data.split('|')
+		user_id = int(parts[1])
+		page = parts[2] if len(parts) > 2 else 0
+		_render_inline(
+			call.message.chat.id,
+			call.message.message_id,
+			_user_detail_text(user_id),
+			parse_mode='HTML',
+			reply_markup=_build_user_actions(user_id, page=page)
+		)
 		return
 
 	if call.data.startswith('audience_toggle_blacklist|'):
-		user_id = int(call.data.split('|', 1)[1])
+		parts = call.data.split('|')
+		user_id = int(parts[1])
+		page = parts[2] if len(parts) > 2 else 0
 		user = AUDIENCE_REPO.get(user_id)
 		if not user:
 			bot.send_message(call.message.chat.id, 'Пользователь не найден.')
 			return
 		AUDIENCE_REPO.blacklist(user_id, is_blacklisted=not bool(user.get('is_blacklisted')))
-		_render_inline(call.message.chat.id, call.message.message_id, _user_detail_text(user_id), parse_mode='HTML', reply_markup=_build_user_actions(user_id))
+		_render_inline(
+			call.message.chat.id,
+			call.message.message_id,
+			_user_detail_text(user_id),
+			parse_mode='HTML',
+			reply_markup=_build_user_actions(user_id, page=page)
+		)
 		return
 
 	if call.data.startswith('audience_unsubscribe|'):
-		user_id = int(call.data.split('|', 1)[1])
+		parts = call.data.split('|')
+		user_id = int(parts[1])
+		page = parts[2] if len(parts) > 2 else 0
 		AUDIENCE_REPO.unsubscribe(user_id)
-		_render_inline(call.message.chat.id, call.message.message_id, _user_detail_text(user_id), parse_mode='HTML', reply_markup=_build_user_actions(user_id))
+		_render_inline(
+			call.message.chat.id,
+			call.message.message_id,
+			_user_detail_text(user_id),
+			parse_mode='HTML',
+			reply_markup=_build_user_actions(user_id, page=page)
+		)
 		return
 
 	if call.data == 'segments_menu':
@@ -2677,18 +2919,17 @@ def podcategors(call):
 		_render_inline(call.message.chat.id, call.message.message_id, _campaigns_text(), parse_mode='HTML', reply_markup=_build_campaigns_menu())
 		return
 
-	if call.data == 'campaigns_list':
-		items = CAMPAIGN_REPO.list()
-		keyboard = types.InlineKeyboardMarkup()
-		for item in items[:12]:
-			keyboard.add(
-				types.InlineKeyboardButton(
-					text=f'🚀 {item.get("name")} [{item.get("status")}]'[:60],
-					callback_data=f'campaign_view|{item.get("id")}'
-				)
-			)
-		keyboard.add(types.InlineKeyboardButton(text='⬅️ Назад', callback_data='campaigns_menu'))
-		_render_inline(call.message.chat.id, call.message.message_id, _campaigns_text(), parse_mode='HTML', reply_markup=keyboard)
+	if call.data == 'campaigns_list' or call.data.startswith('campaigns_list|'):
+		page = 0
+		if '|' in call.data:
+			page = call.data.split('|', 1)[1]
+		_render_inline(
+			call.message.chat.id,
+			call.message.message_id,
+			_campaigns_list_text(page),
+			parse_mode='HTML',
+			reply_markup=_build_campaigns_list_keyboard(page)
+		)
 		return
 
 	if call.data == 'campaign_create_start':
@@ -2719,32 +2960,72 @@ def podcategors(call):
 		return
 
 	if call.data.startswith('campaign_view|'):
-		campaign_id = int(call.data.split('|', 1)[1])
-		_render_inline(call.message.chat.id, call.message.message_id, _campaign_detail_text(campaign_id), parse_mode='HTML', reply_markup=_build_campaign_actions(campaign_id))
+		parts = call.data.split('|')
+		campaign_id = int(parts[1])
+		page = parts[2] if len(parts) > 2 else 0
+		_render_inline(
+			call.message.chat.id,
+			call.message.message_id,
+			_campaign_detail_text(campaign_id),
+			parse_mode='HTML',
+			reply_markup=_build_campaign_actions(campaign_id, page=page)
+		)
 		return
 
 	if call.data.startswith('campaign_start|'):
-		campaign_id = int(call.data.split('|', 1)[1])
+		parts = call.data.split('|')
+		campaign_id = int(parts[1])
+		page = parts[2] if len(parts) > 2 else 0
 		CAMPAIGN_SERVICE.start_campaign(campaign_id)
-		_render_inline(call.message.chat.id, call.message.message_id, _campaign_detail_text(campaign_id) + '\n\n🕒 Кампания переведена в scheduled. Worker подхватит её автоматически.', parse_mode='HTML', reply_markup=_build_campaign_actions(campaign_id))
+		_render_inline(
+			call.message.chat.id,
+			call.message.message_id,
+			_campaign_detail_text(campaign_id) + '\n\n🕒 Кампания переведена в scheduled.',
+			parse_mode='HTML',
+			reply_markup=_build_campaign_actions(campaign_id, page=page)
+		)
 		return
 
 	if call.data.startswith('campaign_pause|'):
-		campaign_id = int(call.data.split('|', 1)[1])
+		parts = call.data.split('|')
+		campaign_id = int(parts[1])
+		page = parts[2] if len(parts) > 2 else 0
 		CAMPAIGN_SERVICE.pause_campaign(campaign_id)
-		_render_inline(call.message.chat.id, call.message.message_id, _campaign_detail_text(campaign_id), parse_mode='HTML', reply_markup=_build_campaign_actions(campaign_id))
+		_render_inline(
+			call.message.chat.id,
+			call.message.message_id,
+			_campaign_detail_text(campaign_id),
+			parse_mode='HTML',
+			reply_markup=_build_campaign_actions(campaign_id, page=page)
+		)
 		return
 
 	if call.data.startswith('campaign_resume|'):
-		campaign_id = int(call.data.split('|', 1)[1])
+		parts = call.data.split('|')
+		campaign_id = int(parts[1])
+		page = parts[2] if len(parts) > 2 else 0
 		CAMPAIGN_SERVICE.resume_campaign(campaign_id)
-		_render_inline(call.message.chat.id, call.message.message_id, _campaign_detail_text(campaign_id), parse_mode='HTML', reply_markup=_build_campaign_actions(campaign_id))
+		_render_inline(
+			call.message.chat.id,
+			call.message.message_id,
+			_campaign_detail_text(campaign_id),
+			parse_mode='HTML',
+			reply_markup=_build_campaign_actions(campaign_id, page=page)
+		)
 		return
 
 	if call.data.startswith('campaign_cancel|'):
-		campaign_id = int(call.data.split('|', 1)[1])
+		parts = call.data.split('|')
+		campaign_id = int(parts[1])
+		page = parts[2] if len(parts) > 2 else 0
 		CAMPAIGN_SERVICE.cancel_campaign(campaign_id)
-		_render_inline(call.message.chat.id, call.message.message_id, _campaign_detail_text(campaign_id), parse_mode='HTML', reply_markup=_build_campaign_actions(campaign_id))
+		_render_inline(
+			call.message.chat.id,
+			call.message.message_id,
+			_campaign_detail_text(campaign_id),
+			parse_mode='HTML',
+			reply_markup=_build_campaign_actions(campaign_id, page=page)
+		)
 		return
 
 	if call.data == 'join_requests_menu':
@@ -2853,49 +3134,109 @@ def podcategors(call):
 		return
 
 	if call.data == 'accounts_menu':
-		sessions = list_sessions()
-		active = 0
-		limited = 0
-		dead = 0
-		warming = 0
-		for s in sessions:
-			st, _, _ = get_account_health(s)
-			if st == 'active':
-				active += 1
-			elif st == 'limited':
-				limited += 1
-			elif st == 'dead':
-				dead += 1
-			if get_account_warmup_remaining(s) > 0:
-				warming += 1
 		_render_inline(
 			call.message.chat.id,
 			call.message.message_id,
-			f'📂 <b>Управление аккаунтами</b>\n'
-			f'Загружено: <b>{len(sessions)}</b>\n'
-			f'🟢 active: <b>{active}</b> | 🟠 limited: <b>{limited}</b> | 🔴 dead: <b>{dead}</b>\n'
-			f'🕒 На прогреве: <b>{warming}</b>\n\n'
-			'Отправь <code>.session</code> или <code>.json</code> файлом — проверка выполнится автоматически.',
+			_accounts_text(),
 			reply_markup=_build_accounts_menu(),
 			parse_mode='HTML'
 		)
 		return
 
-	if call.data == 'accounts_list':
-		sessions = list_sessions()
-		if len(sessions) == 0:
-			bot.send_message(call.message.chat.id, 'Аккаунты не добавлены.')
+	if call.data == 'accounts_upload_help':
+		_render_inline(
+			call.message.chat.id,
+			call.message.message_id,
+			'🔑 <b>Добавление аккаунтов</b>\n\n'
+			'Отправь <code>.session</code> или <code>.json</code> файлом.\n'
+			'Проверка начнется автоматически после загрузки.',
+			parse_mode='HTML',
+			reply_markup=_build_accounts_menu()
+		)
+		return
+
+	if call.data == 'accounts_list' or call.data.startswith('accounts_list|'):
+		page = 0
+		if '|' in call.data:
+			page = call.data.split('|', 1)[1]
+		if len(list_sessions()) == 0:
+			_render_inline(
+				call.message.chat.id,
+				call.message.message_id,
+				'📋 <b>Аккаунты</b>\n\nСписок пока пуст.',
+				parse_mode='HTML',
+				reply_markup=_build_accounts_menu()
+			)
 			return
-		lines = []
-		for idx, s in enumerate(sessions, start=1):
-			status, details, _ = get_account_health(s)
-			lines.append(f'{idx}. {_account_status_emoji(status)} <code>{s}</code> — <b>{_account_status_title(status)}</b>')
-			if details:
-				lines.append(f'   <code>{_health_details_ru(details)[:120]}</code>')
-			rem = get_account_warmup_remaining(s)
-			if rem > 0:
-				lines.append(f'   🕒 Прогрев: <b>{_fmt_seconds_ru(rem)}</b>')
-		_send_html_chunks(call.message.chat.id, '📄 <b>Список аккаунтов</b>\n', lines)
+		_render_inline(
+			call.message.chat.id,
+			call.message.message_id,
+			_accounts_list_text(page),
+			parse_mode='HTML',
+			reply_markup=_build_accounts_list_keyboard(page)
+		)
+		return
+
+	if call.data.startswith('account_open|'):
+		parts = call.data.split('|')
+		account_index = parts[1]
+		page = parts[2] if len(parts) > 2 else 0
+		_render_inline(
+			call.message.chat.id,
+			call.message.message_id,
+			_account_card_text(account_index),
+			parse_mode='HTML',
+			reply_markup=_build_account_card_keyboard(account_index, page=page)
+		)
+		return
+
+	if call.data.startswith('account_check|'):
+		parts = call.data.split('|')
+		account_index = parts[1]
+		page = parts[2] if len(parts) > 2 else 0
+		rows = _account_rows()
+		try:
+			item = rows[int(account_index)]
+		except Exception:
+			bot.answer_callback_query(call.id, 'Аккаунт не найден')
+			return
+		status, details = _check_account_health(item.get('session'), deep_check=False)
+		prev = set_account_health(item.get('session'), status, details)
+		_notify_health_change_if_needed(item.get('session'), prev, status, details)
+		_render_inline(
+			call.message.chat.id,
+			call.message.message_id,
+			_account_card_text(account_index),
+			parse_mode='HTML',
+			reply_markup=_build_account_card_keyboard(account_index, page=page)
+		)
+		return
+
+	if call.data.startswith('account_delete|'):
+		parts = call.data.split('|')
+		account_index = parts[1]
+		page = parts[2] if len(parts) > 2 else 0
+		rows = _account_rows()
+		try:
+			item = rows[int(account_index)]
+			filename = item.get('session')
+		except Exception:
+			bot.answer_callback_query(call.id, 'Аккаунт не найден')
+			return
+		try:
+			if os.path.exists(filename):
+				os.remove(filename)
+			delete_session_file(filename)
+			bot.answer_callback_query(call.id, 'Аккаунт удален')
+		except Exception as e:
+			bot.answer_callback_query(call.id, f'Ошибка: {e}')
+		_render_inline(
+			call.message.chat.id,
+			call.message.message_id,
+			_accounts_list_text(page),
+			parse_mode='HTML',
+			reply_markup=_build_accounts_list_keyboard(page)
+		)
 		return
 
 	if call.data == 'accounts_check_all':
@@ -2911,18 +3252,6 @@ def podcategors(call):
 			_notify_health_change_if_needed(s, prev, status, details)
 			lines.append(f'{_account_status_emoji(status)} <code>{s}</code> — <b>{_account_status_title(status)}</b>')
 		_send_html_chunks(call.message.chat.id, '✅ Проверка завершена\n', lines)
-		return
-
-	if call.data == 'accounts_delete_menu':
-		sessions = list_sessions()
-		if len(sessions) == 0:
-			bot.send_message(call.message.chat.id, 'Удалять нечего: аккаунтов нет.')
-			return
-		keyboard = types.InlineKeyboardMarkup()
-		for s in sessions[:20]:
-			keyboard.add(types.InlineKeyboardButton(text=f'🗑 {s}', callback_data=f'del_session|{s}'))
-		keyboard.add(types.InlineKeyboardButton(text='⬅️ Назад', callback_data='accounts_menu'))
-		bot.send_message(call.message.chat.id, 'Выберите аккаунт для удаления:', reply_markup=keyboard)
 		return
 
 	if call.data.startswith('del_session|'):
@@ -3032,10 +3361,10 @@ def podcategors(call):
 		_prompt_step(
 			call.message.chat.id,
 			state,
-			f'🔎 <b>Парсинг аудитории</b>\n'
+			f'📡 <b>Парсинг</b>\n\n'
 			f'Режим: <b>{_parser_mode_title(parse_mode)}</b>\n'
-			f'{mode_text}: отправь источники (через запятую или с новой строки).\n\n'
-			'Пример:\n<code>@chat1\n@chat2</code>',
+			'Введи ссылку или username:\n\n'
+			'<code>@chat1\n@chat2</code>',
 			parser_step_sources
 		)
 		return
@@ -3077,22 +3406,13 @@ def podcategors(call):
 	if call.data == 'task_status':
 		items = RUNNING_TASKS.get(call.message.chat.id, [])
 		if len(items) == 0:
-			parse_summary = PARSE_TASK_REPO.summary()
-			if parse_summary.get('running', 0) or parse_summary.get('queued', 0):
-				recent = PARSE_TASK_REPO.list(limit=5)
-				lines = [
-					'📈 Статус задач',
-					f'Parse queued: {parse_summary.get("queued", 0)}',
-					f'Parse running: {parse_summary.get("running", 0)}',
-				]
-				for item in recent:
-					lines.append(
-						f'• parse #{item.get("id")} | {item.get("mode")} | {item.get("status")} | '
-						f'saved={item.get("total_saved", 0)}'
-					)
-				_render_inline(call.message.chat.id, call.message.message_id, '\n'.join(lines), reply_markup=build_new_menu(), parse_mode=None)
-				return
-			bot.send_message(call.message.chat.id, 'Сейчас активных задач нет ✅')
+			_render_inline(
+				call.message.chat.id,
+				call.message.message_id,
+				_status_text(),
+				reply_markup=_build_status_menu(),
+				parse_mode='HTML'
+			)
 			return
 		lines = []
 		for idx, item in enumerate(items, start=1):
@@ -3118,12 +3438,18 @@ def podcategors(call):
 				except Exception:
 					extra = ''
 			lines.append(f'{idx}. {item["title"]} - {status} - {pid_text}{extra}')
-		lines.append(f'Очередь (глобально): {TASK_QUEUE.qsize()}')
-		_render_inline(call.message.chat.id, call.message.message_id, '📊 Статус задач:\n' + '\n'.join(lines), reply_markup=build_new_menu(), parse_mode=None)
+		lines.append(f'Очередь: {TASK_QUEUE.qsize()}')
+		_render_inline(
+			call.message.chat.id,
+			call.message.message_id,
+			_status_text() + '\n\n' + '<b>Активные процессы</b>\n' + '\n'.join(lines),
+			reply_markup=_build_status_menu(),
+			parse_mode='HTML'
+		)
 		return
 
 	if call.data == 'manage_menu':
-		_render_inline(call.message.chat.id, call.message.message_id, '⚙️ Управление задачами:', reply_markup=_build_manage_menu(), parse_mode=None)
+		_render_inline(call.message.chat.id, call.message.message_id, '⚙️ <b>Процессы</b>\n\nУправление очередью и запущенными задачами.', reply_markup=_build_manage_menu(), parse_mode='HTML')
 		return
 
 	if call.data == 'task_stop_menu':
@@ -3174,7 +3500,7 @@ def podcategors(call):
 		return
 
 	if call.data == 'stats_overview':
-		_render_inline(call.message.chat.id, call.message.message_id, _stats_text(), reply_markup=build_new_menu(), parse_mode=None)
+		_render_inline(call.message.chat.id, call.message.message_id, _stats_text(), reply_markup=build_new_menu(), parse_mode='HTML')
 		return
 
 	if call.data == 'help_new':
