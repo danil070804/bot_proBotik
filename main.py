@@ -125,6 +125,7 @@ DEFAULT_APP_SETTINGS = {
 	'campaign_max_attempts': '1',
 	'campaign_stop_on_error_rate': '0.30',
 	'accounts_allow_limited': '0',
+	'accounts_auto_delete_inactive': '0',
 	'interface_mode': 'pro',
 	'active_preset': 'standard',
 }
@@ -535,6 +536,59 @@ def list_sessions():
 	return get_sessions()
 
 
+def _is_inactive_account_status(status):
+	return str(status or '').strip().lower() in {'dead', 'invalid'}
+
+
+def _auto_delete_inactive_enabled():
+	return _setting_bool('accounts_auto_delete_inactive')
+
+
+def _delete_account_artifacts(session):
+	filename = str(session or '').strip()
+	if not filename:
+		return False, 'session_missing'
+	errors = []
+	try:
+		if os.path.exists(filename):
+			os.remove(filename)
+	except Exception as e:
+		errors.append(str(e))
+	try:
+		delete_session_file(filename)
+	except Exception as e:
+		errors.append(str(e))
+	try:
+		set_account_warmup(filename, 0)
+	except Exception:
+		pass
+	return len(errors) == 0, '; '.join(errors)
+
+
+def _apply_inactive_account_policy(session, status):
+	if not _auto_delete_inactive_enabled() or not _is_inactive_account_status(status):
+		return False, False, ''
+	deleted, error = _delete_account_artifacts(session)
+	return True, deleted, error
+
+
+def _inactive_account_rows():
+	return [row for row in _account_rows() if _is_inactive_account_status(row.get('status'))]
+
+
+def _cleanup_inactive_accounts():
+	rows = _inactive_account_rows()
+	removed = 0
+	failed = []
+	for row in rows:
+		ok, error = _delete_account_artifacts(row.get('session'))
+		if ok:
+			removed += 1
+		else:
+			failed.append(f'{row.get("session")}: {error or "delete_failed"}')
+	return {'found': len(rows), 'removed': removed, 'failed': failed}
+
+
 ACCOUNTS_PAGE_SIZE = 5
 AUDIENCE_PAGE_SIZE = 6
 CAMPAIGNS_PAGE_SIZE = 6
@@ -681,7 +735,11 @@ def _accounts_text():
 	return build_section_screen(
 		'🔑 Аккаунты',
 		stats=[('Всего', len(rows)), ('Активны', active, ' 🟢'), ('Проблемы', problems, ' 🔴')],
-		description='Управление аккаунтами и сессиями.'
+		description='Управление аккаунтами и сессиями.',
+		footer=(
+			f'Автоочистка неактивных: {"вкл" if _auto_delete_inactive_enabled() else "выкл"}.\n'
+			'Удаляются только dead и invalid. Ограниченные и Flood не трогаются.'
+		)
 	)
 
 
@@ -1242,11 +1300,15 @@ def _process_uploaded_session(filename):
 	if result.status == 'working':
 		warmup_days = max(0, _setting_int('account_warmup_days'))
 		set_account_warmup(filename, warmup_days * 86400)
+	attempted_delete, auto_deleted, delete_error = _apply_inactive_account_policy(filename, result.status)
 	return {
 		'status': result.status,
 		'reason_code': result.reason_code,
 		'reason_text': result.reason_text,
 		'warmup_days': warmup_days,
+		'auto_delete_attempted': attempted_delete,
+		'auto_deleted': auto_deleted,
+		'delete_error': delete_error,
 	}
 
 
@@ -1367,6 +1429,8 @@ def _upload_batch_text(batch):
 				f'⚫ Не авторизованы: <b>{int(counts.get("invalid") or 0)}</b>',
 			]
 		)
+	if int(batch.get('auto_deleted') or 0) > 0:
+		lines.append(f'🧹 Автоудалено: <b>{int(batch.get("auto_deleted") or 0)}</b>')
 	if files:
 		lines.append('')
 		lines.append('Последние файлы:')
@@ -1406,10 +1470,16 @@ def _finalize_upload_batch(chat_id, batch_id, filename, result):
 		status = str((result or {}).get('status') or 'invalid').strip().lower()
 		counts[status] = int(counts.get(status) or 0) + 1
 		batch['counts'] = counts
+		if (result or {}).get('auto_deleted'):
+			batch['auto_deleted'] = int(batch.get('auto_deleted') or 0) + 1
 		if status in {'dead', 'invalid'}:
 			errors = list(batch.get('errors') or [])
 			reason = str((result or {}).get('reason_code') or status)
 			errors.append(f'{filename}: {reason}')
+			batch['errors'] = errors[-6:]
+		if (result or {}).get('delete_error'):
+			errors = list(batch.get('errors') or [])
+			errors.append(f'{filename}: delete_failed')
 			batch['errors'] = errors[-6:]
 		if int(batch.get('processed') or 0) >= int(batch.get('queued') or 0):
 			batch['closed'] = True
@@ -1672,6 +1742,7 @@ def _account_health_monitor():
 				result = _check_account_health(session)
 				prev = _store_account_health_result(session, result)
 				_notify_health_change_if_needed(session, prev, result)
+				_apply_inactive_account_policy(session, result.status)
 		except Exception:
 			pass
 		time.sleep(max(60, int(config.account_monitor_interval)))
@@ -2070,6 +2141,7 @@ def _setting_title(key):
 		'parser_comments_limit': 'Лимит комментариев парсинга',
 		'parser_use_all_sessions': 'Использовать все аккаунты в парсинге',
 		'accounts_allow_limited': 'Разрешить ограниченные аккаунты',
+		'accounts_auto_delete_inactive': 'Автоудаление неактивных аккаунтов',
 		'interface_mode': 'Режим интерфейса',
 		'campaign_rate_limit_per_minute': 'Rate limit в минуту',
 		'campaign_rate_limit_per_hour': 'Rate limit в час',
@@ -2111,7 +2183,12 @@ def _settings_category_text(category):
 		'limits': ('⏱ Лимиты', f'Парсинг: {_setting_int("parser_posts_limit")} / {_setting_int("parser_comments_limit")}. Rate: {_setting_int("campaign_rate_limit_per_minute")}/мин.'),
 		'notifications': ('🔔 Уведомления', 'Системные уведомления и служебные сообщения будут вынесены сюда.'),
 		'interface': ('🎨 Интерфейс', f'Режим: {"Compact" if _is_compact_mode() else "Pro"}. Compact показывает только ключевые метрики, Pro — расширенные summary.'),
-		'security': ('🛡 Безопасность', f'Прогрев аккаунтов: {_setting_int("account_warmup_days")} дн. Ограниченные аккаунты: {"вкл" if _setting_bool("accounts_allow_limited") else "выкл"}.'),
+		'security': (
+			'🛡 Безопасность',
+			f'Прогрев аккаунтов: {_setting_int("account_warmup_days")} дн. '
+			f'Ограниченные аккаунты: {"вкл" if _setting_bool("accounts_allow_limited") else "выкл"}. '
+			f'Автоочистка dead/invalid: {"вкл" if _auto_delete_inactive_enabled() else "выкл"}.'
+		),
 	}
 	title, description = data.get(category, ('⚙️ Настройки', 'Раздел в разработке.'))
 	return build_section_screen(title, description=description)
@@ -2135,6 +2212,7 @@ def _build_settings_detail_menu(category):
 		return build_inline_keyboard([
 			[('🕒 Прогрев', 'settings_edit|account_warmup_days')],
 			[('🟡 Ограниченные', 'settings_toggle|accounts_allow_limited')],
+			[('🧹 Автоочистка', 'settings_toggle|accounts_auto_delete_inactive')],
 			[('⬅️ Назад', 'settings_menu')],
 		])
 	if category == 'interface':
@@ -2399,7 +2477,7 @@ def _build_accounts_menu():
 	return build_inline_keyboard([
 		[('➕ Добавить', 'accounts_upload_help'), ('📋 Список', 'accounts_list|0')],
 		[('🩺 Проверка', 'accounts_check_all'), ('🎯 В цель', 'accounts_join_target_start')],
-		[('🧩 Группы', 'accounts_groups'), ('🗑 Удалить', 'accounts_list|0')],
+		[('🧩 Группы', 'accounts_groups'), ('🧹 Неактивные', 'accounts_cleanup_inactive')],
 		[('⬅️ Назад', 'main_menu')],
 	])
 
@@ -4400,6 +4478,56 @@ def podcategors(call):
 		)
 		return
 
+	if call.data == 'accounts_cleanup_inactive':
+		rows = _inactive_account_rows()
+		_render_inline(
+			call.message.chat.id,
+			call.message.message_id,
+			build_confirm_screen(
+				'🧹 Очистка неактивных аккаунтов',
+				summary=[
+					f'Найдено неактивных: {len(rows)}',
+					'Будут удалены только аккаунты со статусом dead и invalid.',
+					'Ограниченные и Flood-аккаунты останутся в системе.',
+				],
+				confirm_label='Удалить',
+				cancel_label='Назад'
+			),
+			parse_mode='HTML',
+			reply_markup=build_inline_keyboard([
+				[('✅ Удалить', 'accounts_cleanup_inactive_run')],
+				[('⬅️ Назад', 'accounts_menu')],
+			])
+		)
+		return
+
+	if call.data == 'accounts_cleanup_inactive_run':
+		result = _cleanup_inactive_accounts()
+		highlights = []
+		if result.get('found', 0) == 0:
+			highlights.append('Неактивные аккаунты не найдены.')
+		elif result.get('removed', 0) > 0:
+			highlights.append('Удалены только dead и invalid сессии.')
+		for row in list(result.get('failed') or [])[:3]:
+			highlights.append(row)
+		_render_inline(
+			call.message.chat.id,
+			call.message.message_id,
+			build_status_screen(
+				'🧹 Очистка завершена',
+				stats=[
+					('Найдено', result.get('found', 0)),
+					('Удалено', result.get('removed', 0)),
+					('Ошибок', len(result.get('failed') or [])),
+				],
+				highlights=highlights,
+				footer='Для фоновой автоочистки включи настройку в разделе Безопасность.'
+			),
+			parse_mode='HTML',
+			reply_markup=_build_accounts_menu()
+		)
+		return
+
 	if call.data == 'accounts_groups':
 		_render_inline(call.message.chat.id, call.message.message_id, _stub_text('🧩 Группы аккаунтов', 'Группы и теги аккаунтов будут добавлены отдельным экраном.'), parse_mode='HTML', reply_markup=_build_accounts_menu())
 		return
@@ -4456,6 +4584,19 @@ def podcategors(call):
 		result = _check_account_health(item.get('session'), deep_check=False)
 		prev = _store_account_health_result(item.get('session'), result)
 		_notify_health_change_if_needed(item.get('session'), prev, result)
+		attempted_delete, auto_deleted, delete_error = _apply_inactive_account_policy(item.get('session'), result.status)
+		if attempted_delete and auto_deleted:
+			bot.answer_callback_query(call.id, 'Аккаунт удален как неактивный')
+			_render_inline(
+				call.message.chat.id,
+				call.message.message_id,
+				_accounts_list_text(page),
+				parse_mode='HTML',
+				reply_markup=_build_accounts_list_keyboard(page)
+			)
+			return
+		if attempted_delete and delete_error:
+			bot.answer_callback_query(call.id, f'Не удалось удалить: {delete_error[:120]}')
 		_render_inline(
 			call.message.chat.id,
 			call.message.message_id,
@@ -4491,9 +4632,9 @@ def podcategors(call):
 			bot.answer_callback_query(call.id, 'Аккаунт не найден')
 			return
 		try:
-			if os.path.exists(filename):
-				os.remove(filename)
-			delete_session_file(filename)
+			ok, error = _delete_account_artifacts(filename)
+			if not ok:
+				raise RuntimeError(error or 'delete_failed')
 			bot.answer_callback_query(call.id, 'Аккаунт удален')
 		except Exception as e:
 			bot.answer_callback_query(call.id, f'Ошибка: {e}')
@@ -4520,11 +4661,18 @@ def podcategors(call):
 			'invalid': 0,
 		}
 		problem_lines = []
+		auto_deleted = 0
+		delete_errors = []
 		for s in sessions:
 			result = _check_account_health(s, deep_check=False)
 			prev = _store_account_health_result(s, result)
 			_notify_health_change_if_needed(s, prev, result)
 			counts[result.status] = counts.get(result.status, 0) + 1
+			attempted_delete, deleted, delete_error = _apply_inactive_account_policy(s, result.status)
+			if deleted:
+				auto_deleted += 1
+			elif attempted_delete and delete_error:
+				delete_errors.append(f'{s}: {delete_error}')
 			if result.status != 'working':
 				problem_lines.append(
 					f'{_account_status_emoji(result.status)} <code>{s}</code> — <code>{result.reason_code}</code>'
@@ -4538,8 +4686,12 @@ def podcategors(call):
 			f'🔴 Мёртвые: <b>{counts.get("dead", 0)}</b>\n'
 			f'⚫ Не авторизованы: <b>{counts.get("invalid", 0)}</b>'
 		)
+		if auto_deleted:
+			text += f'\n🧹 Автоудалено: <b>{auto_deleted}</b>'
 		if problem_lines:
 			text += '\n\n' + '\n'.join(problem_lines[:10])
+		if delete_errors:
+			text += '\n\nОшибки удаления:\n' + '\n'.join(f'• <code>{row[:120]}</code>' for row in delete_errors[:3])
 		_render_inline(
 			call.message.chat.id,
 			call.message.message_id,
