@@ -522,6 +522,16 @@ async def run_parser(
         source_results.append(source_result)
         progress['source_results'] = source_results[-8:]
         if task_id:
+            task_record = PARSE_TASK_REPO.get(task_id) or {}
+            task_meta = dict(task_record.get('meta_json') or {})
+            task_meta['stats'] = {
+                'commenters_saved': total_commenters_saved,
+                'authors_saved': total_authors_saved,
+                'unique_users': len(total_unique_keys),
+                'duplicates': max(0, total_commenters_saved + total_authors_saved - len(total_unique_keys)),
+                'saved': total_saved,
+                'skipped': total_skipped,
+            }
             PARSE_TASK_REPO.update_progress(
                 task_id,
                 found=total_found,
@@ -533,16 +543,28 @@ async def run_parser(
                 task_id,
                 source_report_json=source_results,
                 last_error=progress.get('last_error') or '',
+                meta_json=task_meta,
             )
         _write_progress(progress_file, progress)
 
     progress['status'] = 'finished_with_errors' if progress['errors'] else 'finished'
     progress['message'] = 'Parser finished with errors' if progress['errors'] else 'Parser finished'
     if task_id:
+        task_record = PARSE_TASK_REPO.get(task_id) or {}
+        task_meta = dict(task_record.get('meta_json') or {})
+        task_meta['stats'] = {
+            'commenters_saved': total_commenters_saved,
+            'authors_saved': total_authors_saved,
+            'unique_users': len(total_unique_keys),
+            'duplicates': max(0, total_commenters_saved + total_authors_saved - len(total_unique_keys)),
+            'saved': total_saved,
+            'skipped': total_skipped,
+        }
         PARSE_TASK_REPO.update_details(
             task_id,
             source_report_json=source_results,
             last_error=progress.get('last_error') or '',
+            meta_json=task_meta,
         )
         PARSE_TASK_REPO.finish(task_id, status='failed' if progress['errors'] else 'finished')
     _write_progress(progress_file, progress)

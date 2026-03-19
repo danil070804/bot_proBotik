@@ -273,8 +273,17 @@ def _recent_platform_highlights():
 	items = []
 	last_task = next(iter(PARSE_TASK_REPO.list(limit=1)), None)
 	if last_task:
-		status = 'завершён' if last_task.get('status') == 'finished' else last_task.get('status') or '—'
-		items.append(f'Парсинг {last_task.get("source_value") or "без источника"} — {status}')
+		status = {
+			'finished': 'завершено',
+			'failed': 'ошибка',
+			'running': 'в работе',
+			'queued': 'в очереди',
+			'paused': 'пауза',
+			'cancelled': 'отменено',
+		}.get(str(last_task.get('status') or '').strip(), last_task.get('status') or '—')
+		items.append(
+			f'{_parser_mode_title(last_task.get("mode"))} / {_parse_task_sources_count(last_task)} источника — {status}'
+		)
 	account_rows = _account_rows()
 	problem_count = len([row for row in account_rows if row.get('status') in {'limited', 'flooded', 'dead', 'invalid'}])
 	if problem_count:
@@ -285,20 +294,160 @@ def _recent_platform_highlights():
 	return items[:3]
 
 
+def _active_runtime_tasks_count():
+	total = 0
+	for items in RUNNING_TASKS.values():
+		total += len([item for item in items if item.get('status') in {'queued', 'running'}])
+	return total
+
+
+def _build_error_entries(chat_id):
+	entries = []
+	for row in _account_rows():
+		if row.get('status') not in {'limited', 'flooded', 'dead', 'invalid'}:
+			continue
+		entries.append(
+			{
+				'kind': 'account',
+				'title': f'Аккаунт {row.get("phone") or row.get("session")}',
+				'reason': row.get('reason_code') or row.get('status') or 'unknown_error',
+				'detail': _health_details_ru(row.get('details') or ''),
+				'time': _compact_dt(row.get('last_check')),
+				'open_callback': f'account_open|{row.get("index")}|0',
+				'retry_callback': f'account_check|{row.get("index")}|0',
+			}
+		)
+	for task in PARSE_TASK_REPO.list(limit=20):
+		if task.get('status') != 'failed' and not task.get('last_error'):
+			continue
+		entries.append(
+			{
+				'kind': 'parse_task',
+				'title': f'Парсинг #{task.get("id")} · {_parser_mode_title(task.get("mode"))}',
+				'reason': (task.get('last_error') or task.get('status') or 'parse_failed')[:140],
+				'detail': task.get('last_error') or '',
+				'time': _compact_dt(task.get('finished_at') or task.get('started_at') or task.get('created_at')),
+				'open_callback': f'parse_task_view|{task.get("id")}|0',
+				'retry_callback': f'parse_task_repeat|{task.get("id")}|0',
+			}
+		)
+	for campaign in CAMPAIGN_REPO.list():
+		if campaign.get('status') != 'failed':
+			continue
+		entries.append(
+			{
+				'kind': 'campaign',
+				'title': f'Кампания {campaign.get("name") or "#" + str(campaign.get("id"))}',
+				'reason': 'campaign_failed',
+				'detail': campaign.get('status') or 'failed',
+				'time': _compact_dt(campaign.get('updated_at') or campaign.get('created_at')),
+				'open_callback': f'campaign_view|{campaign.get("id")}|0',
+				'retry_callback': f'campaign_start|{campaign.get("id")}|0',
+			}
+		)
+	entries.sort(key=lambda item: str(item.get('time') or ''), reverse=True)
+	return entries
+
+
+def _errors_overview_text(chat_id):
+	entries = _build_error_entries(chat_id)
+	account_errors = len([item for item in entries if item.get('kind') == 'account'])
+	parse_errors = len([item for item in entries if item.get('kind') == 'parse_task'])
+	campaign_errors = len([item for item in entries if item.get('kind') == 'campaign'])
+	highlights = []
+	if entries:
+		latest = entries[0]
+		highlights.append(f'Последняя: {latest.get("reason")}')
+		for item in entries[:3]:
+			highlights.append(f'{item.get("title")} — {item.get("reason")} · {item.get("time") or "—"}')
+	else:
+		highlights.append('Ошибок нет.')
+	return build_status_screen(
+		'🧯 Ошибки',
+		stats=[
+			('Аккаунты', account_errors),
+			('Парсинг', parse_errors),
+			('Кампании', campaign_errors),
+		],
+		highlights=highlights,
+	)
+
+
+def _errors_list_text(chat_id, page=0):
+	entries = _build_error_entries(chat_id)
+	items, page, total_pages = _slice_page(entries, page, 6)
+	rows = []
+	for item in items:
+		rows.append(
+			{
+				'primary': item.get('title'),
+				'secondary': item.get('reason'),
+				'meta': item.get('time') or '—',
+			}
+		)
+	return build_list_page('🧯 Ошибки', page, total_pages, rows)
+
+
+def _build_errors_list_keyboard(chat_id, page=0):
+	entries = _build_error_entries(chat_id)
+	items, page, total_pages = _slice_page(entries, page, 6)
+	rows_spec = []
+	if items:
+		open_buttons = [(str(idx), f'error_open|{page}|{idx - 1}') for idx, _ in enumerate(items, start=1)]
+		rows_spec.append(open_buttons[:3])
+		if len(open_buttons) > 3:
+			rows_spec.append(open_buttons[3:6])
+	rows_spec.append([('⬅️', f'errors_list|{max(0, page - 1)}'), ('➡️', f'errors_list|{min(total_pages - 1, page + 1)}')])
+	rows_spec.append([('⬅️ Назад', 'status_errors')])
+	return build_inline_keyboard(rows_spec)
+
+
+def _error_detail_text(chat_id, page, local_index):
+	entries = _build_error_entries(chat_id)
+	items, page, _ = _slice_page(entries, page, 6)
+	try:
+		entry = items[int(local_index)]
+	except Exception:
+		return 'Ошибка не найдена.'
+	return build_entity_card(
+		'🧯 Ошибка',
+		[
+			('Объект', entry.get('title')),
+			('Причина', entry.get('reason')),
+			('Время', entry.get('time') or '—'),
+			('Детали', (entry.get('detail') or '—')[:280]),
+		],
+	)
+
+
+def _build_error_detail_keyboard(chat_id, page, local_index):
+	entries = _build_error_entries(chat_id)
+	items, page, _ = _slice_page(entries, page, 6)
+	try:
+		entry = items[int(local_index)]
+	except Exception:
+		return _build_errors_list_keyboard(chat_id, page)
+	rows = []
+	if entry.get('retry_callback'):
+		rows.append([('🔄 Повторить', entry.get('retry_callback'))])
+	if entry.get('open_callback'):
+		rows.append([('🔍 Открыть', entry.get('open_callback'))])
+	rows.append([('⬅️ Назад', f'errors_list|{page}')])
+	return build_inline_keyboard(rows)
+
+
 def _main_dashboard_text():
 	try:
 		audience = AUDIENCE_REPO.summary()
 		parse_summary = PARSE_TASK_REPO.summary()
 		campaigns = CAMPAIGN_REPO.list()
-		account_errors = len([row for row in _account_rows() if row.get('status') in {'limited', 'flooded', 'dead', 'invalid'}])
-		parse_errors = len([task for task in PARSE_TASK_REPO.list(limit=20) if task.get('status') == 'failed' or task.get('last_error')])
-		campaign_errors = len([c for c in campaigns if c.get('status') == 'failed'])
-		total_errors = account_errors + parse_errors + campaign_errors
+		total_errors = len(_build_error_entries(admin))
+		active_tasks = _active_runtime_tasks_count()
 		stats = [
 			('Аккаунты', len(list_sessions()), ' 🟢'),
 			('Аудитория', audience.get('total', 0)),
-			('Парсинг', f'{parse_summary.get("running", 0) + parse_summary.get("queued", 0)} задачи'),
-			('Кампании', f'{len([c for c in campaigns if c.get("status") in ["running", "scheduled"]])} активна'),
+			('Сегодня найдено', audience.get('today_found', 0)),
+			('Активных задач', active_tasks or int(parse_summary.get('running', 0) or 0) + int(parse_summary.get('queued', 0) or 0)),
 			('Ошибки', total_errors),
 		]
 		highlights = _recent_platform_highlights()
@@ -733,6 +882,13 @@ def _parse_task_rollup(task):
 		'duplicates': 0,
 	}
 	if mode != 'engaged_users':
+		return rollup
+	meta_stats = ((task.get('meta_json') or {}).get('stats') or {})
+	if meta_stats:
+		rollup['authors_saved'] = int(meta_stats.get('authors_saved') or 0)
+		rollup['commenters_saved'] = int(meta_stats.get('commenters_saved') or 0)
+		rollup['unique_users'] = int(meta_stats.get('unique_users') or 0)
+		rollup['duplicates'] = int(meta_stats.get('duplicates') or 0)
 		return rollup
 	unique_total = 0
 	for row in source_reports:
@@ -4459,33 +4615,37 @@ def podcategors(call):
 		return
 
 	if call.data == 'status_errors':
-		lines = []
-		account_rows = _account_rows()
-		account_errors = [row for row in account_rows if row.get('status') in {'limited', 'flooded', 'dead', 'invalid'}]
-		failed_campaigns = [item for item in CAMPAIGN_REPO.list() if item.get('status') == 'failed']
-		for row in account_errors[:5]:
-			lines.append(f'Аккаунт {row.get("phone")} — {row.get("reason_code") or row.get("status")}')
-		for task in PARSE_TASK_REPO.list(limit=6):
-			if task.get('status') == 'failed' or task.get('last_error'):
-				lines.append(f'Парсинг #{task.get("id")} — {(task.get("last_error") or task.get("status") or "")[:90]}')
-		for campaign in failed_campaigns[:5]:
-			lines.append(f'Кампания {campaign.get("name")} — failed')
-		for item in RUNNING_TASKS.get(call.message.chat.id, []):
-			progress = item.get('last_progress') or {}
-			last_error = str(progress.get('last_error') or '').strip()
-			if last_error:
-				lines.append(f'{item.get("title")} — {last_error[:90]}')
-		text = build_status_screen(
-			'🧯 Ошибки',
-			stats=[
-				('Аккаунты', len(account_errors)),
-				('Парсинг', len([task for task in PARSE_TASK_REPO.list(limit=20) if task.get("status") == "failed" or task.get("last_error")])),
-				('Кампании', len(failed_campaigns)),
-				('Процессы', len([item for item in RUNNING_TASKS.get(call.message.chat.id, []) if (item.get("last_progress") or {}).get("last_error")])),
-			],
-			highlights=lines or ['Ошибок нет.'],
+		reply_markup = build_inline_keyboard([
+			[('📋 Список', 'errors_list|0')],
+			[('⬅️ Назад', 'task_status')],
+		])
+		_render_inline(call.message.chat.id, call.message.message_id, _errors_overview_text(call.message.chat.id), reply_markup=reply_markup, parse_mode='HTML')
+		return
+
+	if call.data == 'errors_list' or call.data.startswith('errors_list|'):
+		page = 0
+		if '|' in call.data:
+			page = call.data.split('|', 1)[1]
+		_render_inline(
+			call.message.chat.id,
+			call.message.message_id,
+			_errors_list_text(call.message.chat.id, page),
+			reply_markup=_build_errors_list_keyboard(call.message.chat.id, page),
+			parse_mode='HTML'
 		)
-		_render_inline(call.message.chat.id, call.message.message_id, text, reply_markup=_build_status_menu(), parse_mode='HTML')
+		return
+
+	if call.data.startswith('error_open|'):
+		parts = call.data.split('|')
+		page = int(parts[1])
+		local_index = int(parts[2])
+		_render_inline(
+			call.message.chat.id,
+			call.message.message_id,
+			_error_detail_text(call.message.chat.id, page, local_index),
+			reply_markup=_build_error_detail_keyboard(call.message.chat.id, page, local_index),
+			parse_mode='HTML'
+		)
 		return
 
 	if call.data == 'status_stop_all':
