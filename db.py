@@ -1887,6 +1887,12 @@ def list_audience_users(filters=None, limit=None):
     if filters.get('source_value'):
         clauses.append(f's.source_value = {"%s" if IS_POSTGRES else "?"}')
         params.append(str(filters.get('source_value')).strip())
+    if filters.get('discovered_after'):
+        clauses.append(f'u.discovered_at >= {"%s" if IS_POSTGRES else "?"}')
+        params.append(str(filters.get('discovered_after')).strip())
+    if filters.get('discovered_before'):
+        clauses.append(f'u.discovered_at <= {"%s" if IS_POSTGRES else "?"}')
+        params.append(str(filters.get('discovered_before')).strip())
     if filters.get('consent_status'):
         clauses.append(f'u.consent_status = {"%s" if IS_POSTGRES else "?"}')
         params.append(str(filters.get('consent_status')).strip())

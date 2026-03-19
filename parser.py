@@ -380,6 +380,7 @@ async def run_parser(
                     'saved': int(stats.get('saved') or 0),
                     'skipped': int(stats.get('skipped') or 0),
                     'found': int(stats.get('found') or 0),
+                    'comments': int(stats.get('legacy_saved') or 0),
                     'source_title': stats.get('source_title') or source_label,
                     'source_id': stats.get('source_id'),
                     'join_status': stats.get('join_status') or '',

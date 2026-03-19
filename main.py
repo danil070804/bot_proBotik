@@ -103,6 +103,7 @@ RUNNING_TASKS = {}
 TASK_QUEUE = Queue()
 TASK_LOCK = threading.Lock()
 UPLOAD_QUEUE = Queue()
+AUDIENCE_FILTERS = {}
 DEFAULT_APP_SETTINGS = {
 	'parser_posts_limit': '100',
 	'parser_comments_limit': '200',
@@ -289,14 +290,20 @@ def _main_dashboard_text():
 		audience = AUDIENCE_REPO.summary()
 		parse_summary = PARSE_TASK_REPO.summary()
 		campaigns = CAMPAIGN_REPO.list()
-		active_tasks = parse_summary.get('running', 0) + len([c for c in campaigns if c.get('status') == 'running'])
+		account_errors = len([row for row in _account_rows() if row.get('status') in {'limited', 'flooded', 'dead', 'invalid'}])
+		parse_errors = len([task for task in PARSE_TASK_REPO.list(limit=20) if task.get('status') == 'failed' or task.get('last_error')])
+		campaign_errors = len([c for c in campaigns if c.get('status') == 'failed'])
+		total_errors = account_errors + parse_errors + campaign_errors
 		stats = [
 			('Аккаунты', len(list_sessions()), ' 🟢'),
 			('Аудитория', audience.get('total', 0)),
 			('Парсинг', f'{parse_summary.get("running", 0) + parse_summary.get("queued", 0)} задачи'),
 			('Кампании', f'{len([c for c in campaigns if c.get("status") in ["running", "scheduled"]])} активна'),
+			('Ошибки', total_errors),
 		]
 		highlights = _recent_platform_highlights()
+		if total_errors:
+			highlights.append(f'Есть проблемные зоны: {total_errors}. Рекомендуем открыть центр ошибок.')
 		footer = 'Выбери раздел:' if _is_compact_mode() else 'Выбери раздел или быстрый сценарий ниже.'
 		return build_status_screen('🏠 Teddy Invite', stats=stats, highlights=highlights, footer=footer)
 	except Exception as e:
@@ -376,6 +383,7 @@ def list_sessions():
 ACCOUNTS_PAGE_SIZE = 5
 AUDIENCE_PAGE_SIZE = 6
 CAMPAIGNS_PAGE_SIZE = 6
+PARSE_TASKS_PAGE_SIZE = 6
 
 
 def _page_total(total_items, page_size):
@@ -402,6 +410,30 @@ def _slice_page(items, page, page_size):
 	start = page * page_size
 	end = start + page_size
 	return items[start:end], page, total_pages
+
+
+def _get_audience_filters(user_id):
+	return dict(AUDIENCE_FILTERS.get(int(user_id), {}))
+
+
+def _set_audience_filters(user_id, filters=None):
+	user_id = int(user_id)
+	if filters:
+		AUDIENCE_FILTERS[user_id] = dict(filters)
+	else:
+		AUDIENCE_FILTERS.pop(user_id, None)
+
+
+def _audience_filter_summary(filters):
+	filters = dict(filters or {})
+	parts = []
+	if filters.get('source_value'):
+		parts.append(f'source={filters.get("source_value")}')
+	if filters.get('discovered_after'):
+		parts.append(f'from={str(filters.get("discovered_after"))[:10]}')
+	if filters.get('search'):
+		parts.append(f'search={filters.get("search")}')
+	return ', '.join(parts) if parts else 'без фильтра'
 
 
 def _build_page_nav(prev_callback, next_callback, back_callback):
@@ -475,8 +507,8 @@ def _campaign_status_emoji(status):
 	}.get(str(status or '').strip(), '⚪')
 
 
-def _audience_rows():
-	return AUDIENCE_REPO.list(limit=500)
+def _audience_rows(filters=None):
+	return AUDIENCE_REPO.list(filters=filters, limit=500)
 
 
 def _campaign_rows():
@@ -572,10 +604,10 @@ def _build_account_card_keyboard(account_index, page=0):
 	])
 
 
-def _audience_list_text(page=0):
-	rows = _audience_rows()
+def _audience_list_text(page=0, filters=None):
+	rows = _audience_rows(filters=filters)
 	items, page, total_pages = _slice_page(rows, page, AUDIENCE_PAGE_SIZE)
-	return build_list_page(
+	text = build_list_page(
 		'👥 Аудитория',
 		page,
 		total_pages,
@@ -588,10 +620,13 @@ def _audience_list_text(page=0):
 			for item in items
 		]
 	)
+	if filters:
+		text += f'\n\nФильтр: <code>{_audience_filter_summary(filters)}</code>'
+	return text
 
 
-def _build_audience_list_keyboard(page=0):
-	rows = _audience_rows()
+def _build_audience_list_keyboard(page=0, filters=None):
+	rows = _audience_rows(filters=filters)
 	items, page, total_pages = _slice_page(rows, page, AUDIENCE_PAGE_SIZE)
 	rows_spec = []
 	if items:
@@ -603,6 +638,7 @@ def _build_audience_list_keyboard(page=0):
 		if len(open_buttons) > 4:
 			rows_spec.append(open_buttons[4:8])
 	rows_spec.append([('⬅️', f'audience_list|{max(0, page - 1)}'), ('➡️', f'audience_list|{min(total_pages - 1, page + 1)}')])
+	rows_spec.append([('🧭 Фильтр', 'audience_filters_menu'), ('🧹 Сброс', 'audience_filters_clear')])
 	rows_spec.append([('⬅️ Назад', 'audience_menu')])
 	return build_inline_keyboard(rows_spec)
 
@@ -623,6 +659,117 @@ def _campaigns_list_text(page=0):
 			for item in items
 		]
 	)
+
+
+def _parse_task_status_emoji(status):
+	return {
+		'draft': '⚪',
+		'queued': '⏳',
+		'running': '🔵',
+		'paused': '🟠',
+		'finished': '✅',
+		'failed': '🔴',
+		'cancelled': '⚫',
+	}.get(str(status or '').strip(), '⚪')
+
+
+def _parse_task_rows():
+	return PARSE_TASK_REPO.list(limit=200)
+
+
+def _parse_tasks_list_text(page=0):
+	rows = _parse_task_rows()
+	items, page, total_pages = _slice_page(rows, page, PARSE_TASKS_PAGE_SIZE)
+	return build_list_page(
+		'📋 Задачи парсинга',
+		page,
+		total_pages,
+		[
+			{
+				'badge': _parse_task_status_emoji(item.get('status')),
+				'primary': f'#{item.get("id")} · {_parser_mode_title(item.get("mode"))}',
+				'secondary': f'{item.get("status") or "draft"} · saved {item.get("total_saved", 0)}',
+				'meta': (item.get('source_value') or '—')[:80],
+			}
+			for item in items
+		],
+	)
+
+
+def _build_parse_tasks_list_keyboard(page=0):
+	rows = _parse_task_rows()
+	items, page, total_pages = _slice_page(rows, page, PARSE_TASKS_PAGE_SIZE)
+	rows_spec = []
+	if items:
+		open_buttons = [
+			(str(local_idx), f'parse_task_view|{item.get("id")}|{page}')
+			for local_idx, item in enumerate(items, start=1)
+		]
+		rows_spec.append(open_buttons[:4])
+		if len(open_buttons) > 4:
+			rows_spec.append(open_buttons[4:8])
+	rows_spec.append([('⬅️', f'parse_tasks_list|{max(0, page - 1)}'), ('➡️', f'parse_tasks_list|{min(total_pages - 1, page + 1)}')])
+	rows_spec.append([('⬅️ Назад', 'parsing_menu')])
+	return build_inline_keyboard(rows_spec)
+
+
+def _parse_task_detail_text(task_id):
+	task = PARSE_TASK_REPO.get(task_id)
+	if not task:
+		return 'Задача парсинга не найдена.'
+	source_reports = task.get('source_report_json') or []
+	highlights = []
+	for row in source_reports[:3]:
+		status = row.get('status') or row.get('error_code') or '—'
+		highlights.append(f'{row.get("source_title") or row.get("source")} — {status}, saved {row.get("saved", 0)}')
+	if int(task.get('total_saved') or 0) <= 3:
+		highlights.append('Найдено мало пользователей. Проверь, доступны ли комментарии или участники в источнике.')
+	if task.get('last_error'):
+		highlights.append('Рекомендуем открыть список источников и проверить проблемные цели.')
+	return build_status_screen(
+		'📄 Задача парсинга',
+		stats=[
+			('ID', task.get('id')),
+			('Режим', _parser_mode_title(task.get('mode'))),
+			('Источники', len(source_reports) or len(str(task.get('source_value') or '').splitlines())),
+			('Статус', f'{_parse_task_status_emoji(task.get("status"))} {task.get("status") or "draft"}'),
+			('Сохранено', task.get('total_saved', 0)),
+			('Ошибки', task.get('total_errors', 0)),
+			('Запуск', _compact_dt(task.get('started_at') or task.get('created_at'))),
+		],
+		highlights=[] if _is_compact_mode() else highlights,
+		footer=(task.get('last_error') or '')[:140] if task.get('last_error') else None,
+	)
+
+
+def _parse_task_sources_text(task_id):
+	task = PARSE_TASK_REPO.get(task_id)
+	if not task:
+		return 'Задача парсинга не найдена.'
+	source_reports = task.get('source_report_json') or []
+	lines = [f'📋 <b>Источники задачи #{task_id}</b>']
+	if not source_reports:
+		lines.append('')
+		lines.append('Отчёт по источникам пока пуст.')
+		return '\n'.join(lines)
+	lines.append('')
+	for idx, row in enumerate(source_reports[:20], start=1):
+		status = row.get('status') or row.get('error_code') or '—'
+		lines.append(
+			f'{idx}. <b>{row.get("source_title") or row.get("source")}</b> — '
+			f'<code>{status}</code>, users <b>{row.get("saved", 0)}</b>, comments <b>{row.get("comments", 0)}</b>'
+		)
+		if row.get('error_text'):
+			lines.append(f'   {str(row.get("error_text"))[:140]}')
+	return '\n'.join(lines)
+
+
+def _build_parse_task_actions(task_id, page=0):
+	return build_inline_keyboard([
+		[('📋 Источники', f'parse_task_sources|{task_id}|{page}'), ('🔄 Повторить', f'parse_task_repeat|{task_id}|{page}')],
+		[('👥 Аудитория', 'audience_list|0')],
+		[('⬅️ Назад', f'parse_tasks_list|{page}')],
+	])
 
 
 def _build_campaigns_list_keyboard(page=0):
@@ -972,7 +1119,10 @@ def _format_progress_text(item, progress):
 			lines = []
 			for row in source_results[-3:]:
 				status = 'success' if row.get('status') == 'success' else row.get('error_code') or row.get('status') or '—'
-				lines.append(f'{row.get("source_title") or row.get("source")} — {status}, saved {row.get("saved", 0)}')
+				lines.append(
+					f'{row.get("source_title") or row.get("source")} — {status}, '
+					f'users {row.get("saved", 0)}, comments {row.get("comments", 0)}'
+				)
 			text += '\n\nПоследние источники:\n' + '\n'.join(lines[:3])
 		last_error = str(progress.get('last_error', '') or '').strip()
 		if last_error:
@@ -1076,6 +1226,7 @@ def _queue_worker():
 			if code == 0:
 				progress = item.get('last_progress') or {}
 				if progress.get('mode') == 'parser':
+					task_id = progress.get('parse_task_id')
 					text = (
 						f'✅ Завершено: {item["title"]}\n'
 						f'Код: {code}\n'
@@ -1090,12 +1241,21 @@ def _queue_worker():
 						lines = []
 						for row in source_results[:6]:
 							status = 'success' if row.get('status') == 'success' else row.get('error_code') or row.get('status') or '—'
-							lines.append(f'{row.get("source_title") or row.get("source")} — {status}, saved {row.get("saved", 0)}')
+							lines.append(
+								f'{row.get("source_title") or row.get("source")} — {status}, '
+								f'users {row.get("saved", 0)}, comments {row.get("comments", 0)}'
+							)
 						text += '\n\nПо источникам:\n' + '\n'.join(lines)
 					last_error = str(progress.get('last_error', '') or '').strip()
 					if last_error:
 						text += f'\n\nПоследняя ошибка:\n{last_error[:800]}'
-					_render_inline(item['user_id'], msg_id, text, parse_mode=None)
+					reply_markup = None
+					if task_id:
+						reply_markup = build_inline_keyboard([
+							[('📄 Детали', f'parse_task_view|{task_id}|0'), ('🔄 Повторить', f'parse_task_repeat|{task_id}|0')],
+							[('👥 Открыть аудиторию', 'audience_list|0')],
+						])
+					_render_inline(item['user_id'], msg_id, text, parse_mode=None, reply_markup=reply_markup)
 				elif progress.get('mode') == 'join_target':
 					target_type = 'private invite' if is_invite_target_type(progress.get('target_type')) else 'public username'
 					text = (
@@ -1397,6 +1557,7 @@ def _flow_title(flow):
 		'audience_add': 'Аудитория',
 		'audience_import': 'Импорт аудитории',
 		'audience_search': 'Поиск аудитории',
+		'audience_filter_source': 'Фильтр аудитории',
 		'segment_create': 'Сегмент',
 		'campaign_create': 'Кампания',
 		'join_target': 'Вход в цель',
@@ -1646,8 +1807,9 @@ def _build_communities_menu():
 def _build_audience_menu():
 	return build_inline_keyboard([
 		[('📋 Список', 'audience_list'), ('🔎 Поиск', 'audience_search_start')],
-		[('🏷 Сегменты', 'segments_menu'), ('🚫 Blacklist', 'audience_blacklist_list')],
-		[('📤 Экспорт', 'audience_export'), ('📂 Импорт', 'audience_import_start')],
+		[('🧭 Фильтр', 'audience_filters_menu'), ('🏷 Сегменты', 'segments_menu')],
+		[('🚫 Blacklist', 'audience_blacklist_list'), ('📤 Экспорт', 'audience_export')],
+		[('📂 Импорт', 'audience_import_start')],
 		[('⬅️ Назад', 'main_menu')],
 	])
 
@@ -1657,7 +1819,7 @@ def _build_parser_menu():
 		[('👥 Участники', 'parser_mode|members'), ('💬 Комментаторы', 'parser_mode|commenters')],
 		[('📝 Авторы', 'parser_mode|message_authors'), ('📂 Импорт', 'parser_mode|import_file')],
 		[('✍️ Вручную', 'parser_mode|manual_add')],
-		[('📋 Задачи', 'task_status'), ('🔁 Повторить', 'parser_repeat_last')],
+		[('📋 Задачи', 'parse_tasks_list|0'), ('🔁 Повторить', 'parser_repeat_last')],
 		[('⬅️ Назад', 'main_menu')],
 	])
 
@@ -1835,6 +1997,31 @@ def _segments_text():
 		user_count = len(SEGMENT_REPO.get_users(item.get('id'), limit=500))
 		lines.append(f'• <b>{item.get("name")}</b> — <b>{user_count}</b>')
 	return '\n'.join(lines)
+
+
+def _audience_filters_text(user_id):
+	filters = _get_audience_filters(user_id)
+	highlights = [f'Текущий фильтр: {_audience_filter_summary(filters)}']
+	if filters.get('source_value'):
+		highlights.append(f'Источник: {filters.get("source_value")}')
+	if filters.get('discovered_after'):
+		highlights.append(f'С даты: {str(filters.get("discovered_after"))[:10]}')
+	return build_status_screen(
+		'🧭 Фильтры аудитории',
+		stats=[
+			('Всего после фильтра', len(_audience_rows(filters=filters))),
+			('Источники', len(AUDIENCE_REPO.list_sources(limit=1000))),
+		],
+		highlights=highlights,
+	)
+
+
+def _build_audience_filters_menu():
+	return build_inline_keyboard([
+		[('📂 Источник', 'audience_filter_source_start'), ('🕒 24ч', 'audience_filter_recent|1')],
+		[('📅 7 дней', 'audience_filter_recent|7'), ('🗓 30 дней', 'audience_filter_recent|30')],
+		[('🧹 Сброс', 'audience_filters_clear'), ('⬅️ Назад', 'audience_menu')],
+	])
 
 
 def _build_manage_menu():
@@ -2461,6 +2648,34 @@ def audience_search_step_query(message):
 	keyboard.add(types.InlineKeyboardButton(text='⬅️ Назад', callback_data='audience_menu'))
 	text = f'🔎 <b>Поиск аудитории</b>\nЗапрос: <code>{query}</code>\nНайдено: <b>{len(results)}</b>'
 	_render_inline(message.chat.id, state.get('panel_msg_id'), text, parse_mode='HTML', reply_markup=keyboard)
+
+
+def audience_filter_source_step(message):
+	if not _is_admin(message.chat.id):
+		_deny_access(message.chat.id)
+		return
+	state = USER_STATE.get(message.chat.id, {})
+	if state.get('flow') != 'audience_filter_source':
+		return
+	if _is_cancel(message.text):
+		USER_STATE.pop(message.chat.id, None)
+		bot.send_message(message.chat.id, '❌ Фильтр отменён.', reply_markup=_build_audience_filters_menu())
+		return
+	source_value = str(message.text or '').strip()
+	filters = _get_audience_filters(message.chat.id)
+	if source_value:
+		filters['source_value'] = source_value
+	else:
+		filters.pop('source_value', None)
+	_set_audience_filters(message.chat.id, filters)
+	USER_STATE.pop(message.chat.id, None)
+	_render_inline(
+		message.chat.id,
+		state.get('panel_msg_id'),
+		_audience_list_text(0, filters=filters),
+		parse_mode='HTML',
+		reply_markup=_build_audience_list_keyboard(0, filters=filters)
+	)
 
 
 def segment_create_step_name(message):
@@ -3182,6 +3397,61 @@ def podcategors(call):
 		_render_inline(call.message.chat.id, call.message.message_id, _parsing_text(), parse_mode='HTML', reply_markup=_build_parser_menu())
 		return
 
+	if call.data == 'parse_tasks_list' or call.data.startswith('parse_tasks_list|'):
+		page = 0
+		if '|' in call.data:
+			page = call.data.split('|', 1)[1]
+		_render_inline(
+			call.message.chat.id,
+			call.message.message_id,
+			_parse_tasks_list_text(page),
+			parse_mode='HTML',
+			reply_markup=_build_parse_tasks_list_keyboard(page)
+		)
+		return
+
+	if call.data.startswith('parse_task_view|'):
+		parts = call.data.split('|')
+		task_id = int(parts[1])
+		page = parts[2] if len(parts) > 2 else 0
+		_render_inline(
+			call.message.chat.id,
+			call.message.message_id,
+			_parse_task_detail_text(task_id),
+			parse_mode='HTML',
+			reply_markup=_build_parse_task_actions(task_id, page=page)
+		)
+		return
+
+	if call.data.startswith('parse_task_sources|'):
+		parts = call.data.split('|')
+		task_id = int(parts[1])
+		page = parts[2] if len(parts) > 2 else 0
+		_render_inline(
+			call.message.chat.id,
+			call.message.message_id,
+			_parse_task_sources_text(task_id),
+			parse_mode='HTML',
+			reply_markup=_build_parse_task_actions(task_id, page=page)
+		)
+		return
+
+	if call.data.startswith('parse_task_repeat|'):
+		parts = call.data.split('|')
+		task_id = int(parts[1])
+		task = PARSE_TASK_REPO.get(task_id)
+		if not task:
+			_render_inline(
+				call.message.chat.id,
+				call.message.message_id,
+				build_confirm_screen('🔄 Повтор задачи', summary='Задача не найдена.'),
+				parse_mode='HTML',
+				reply_markup=_build_parser_menu()
+			)
+			return
+		_queue_parser_task_from_record(call.message.chat.id, task, panel_msg_id=call.message.message_id)
+		return
+
 	if call.data == 'parser_repeat_last':
 		last_task = PARSE_TASK_REPO.list(limit=1)
 		if not last_task:
@@ -3259,6 +3529,63 @@ def podcategors(call):
 		_render_inline(call.message.chat.id, call.message.message_id, _audience_text(), parse_mode='HTML', reply_markup=_build_audience_menu())
 		return
 
+	if call.data == 'audience_filters_menu':
+		_render_inline(
+			call.message.chat.id,
+			call.message.message_id,
+			_audience_filters_text(call.message.chat.id),
+			parse_mode='HTML',
+			reply_markup=_build_audience_filters_menu()
+		)
+		return
+
+	if call.data == 'audience_filter_source_start':
+		if _has_active_flow(call.message.chat.id):
+			cur = USER_STATE.get(call.message.chat.id, {}).get('flow')
+			_render_inline(
+				call.message.chat.id,
+				call.message.message_id,
+				f'⚠️ Уже активен сценарий: <b>{_flow_title(cur)}</b>.\nЧтобы начать новый, сначала отмени текущий.',
+				parse_mode='HTML',
+				reply_markup=_step_keyboard()
+			)
+			return
+		state = {'flow': 'audience_filter_source', 'panel_msg_id': call.message.message_id}
+		USER_STATE[call.message.chat.id] = state
+		_prompt_step(
+			call.message.chat.id,
+			state,
+			'🧭 <b>Фильтр аудитории</b>\nВведи source_value источника, например <code>@chatname</code>.',
+			audience_filter_source_step
+		)
+		return
+
+	if call.data.startswith('audience_filter_recent|'):
+		days = int(call.data.split('|', 1)[1])
+		since = (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d %H:%M:%S')
+		filters = _get_audience_filters(call.message.chat.id)
+		filters['discovered_after'] = since
+		_set_audience_filters(call.message.chat.id, filters)
+		_render_inline(
+			call.message.chat.id,
+			call.message.message_id,
+			_audience_list_text(0, filters=filters),
+			parse_mode='HTML',
+			reply_markup=_build_audience_list_keyboard(0, filters=filters)
+		)
+		return
+
+	if call.data == 'audience_filters_clear':
+		_set_audience_filters(call.message.chat.id, {})
+		_render_inline(
+			call.message.chat.id,
+			call.message.message_id,
+			_audience_list_text(0, filters={}),
+			parse_mode='HTML',
+			reply_markup=_build_audience_list_keyboard(0, filters={})
+		)
+		return
+
 	if call.data == 'audience_export':
 		_render_inline(call.message.chat.id, call.message.message_id, _stub_text('📤 Экспорт', 'Экспорт сегментов и выборок будет добавлен отдельным мастером.'), parse_mode='HTML', reply_markup=_build_audience_menu())
 		return
@@ -3311,12 +3638,13 @@ def podcategors(call):
 		page = 0
 		if '|' in call.data:
 			page = call.data.split('|', 1)[1]
+		filters = _get_audience_filters(call.message.chat.id)
 		_render_inline(
 			call.message.chat.id,
 			call.message.message_id,
-			_audience_list_text(page),
+			_audience_list_text(page, filters=filters),
 			parse_mode='HTML',
-			reply_markup=_build_audience_list_keyboard(page)
+			reply_markup=_build_audience_list_keyboard(page, filters=filters)
 		)
 		return
 
