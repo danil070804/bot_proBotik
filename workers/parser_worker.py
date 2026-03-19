@@ -16,7 +16,7 @@ PARSE_TASK_REPO = ParseTaskRepository()
 
 def main():
     parser = argparse.ArgumentParser(description='Telegram parser worker')
-    parser.add_argument('--mode', default='members', choices=['members', 'commenters', 'message_authors'])
+    parser.add_argument('--mode', default='members', choices=['members', 'commenters', 'message_authors', 'engaged_users'])
     parser.add_argument('--target', default='')
     parser.add_argument('--targets-file', default='')
     parser.add_argument('--members-limit', type=int, default=0)

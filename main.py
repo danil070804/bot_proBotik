@@ -721,7 +721,9 @@ def _parse_task_detail_text(task_id):
 	highlights = []
 	for row in source_reports[:3]:
 		status = row.get('status') or row.get('error_code') or '—'
-		highlights.append(f'{row.get("source_title") or row.get("source")} — {status}, saved {row.get("saved", 0)}')
+		highlights.append(
+			f'{row.get("source_title") or row.get("source")} — {status}, {_format_parse_source_metrics(row)}'
+		)
 	if int(task.get('total_saved') or 0) <= 3:
 		highlights.append('Найдено мало пользователей. Проверь, доступны ли комментарии или участники в источнике.')
 	if task.get('last_error'):
@@ -757,7 +759,7 @@ def _parse_task_sources_text(task_id):
 		status = row.get('status') or row.get('error_code') or '—'
 		lines.append(
 			f'{idx}. <b>{row.get("source_title") or row.get("source")}</b> — '
-			f'<code>{status}</code>, users <b>{row.get("saved", 0)}</b>, comments <b>{row.get("comments", 0)}</b>'
+			f'<code>{status}</code>, <b>{_format_parse_source_metrics(row)}</b>'
 		)
 		if row.get('error_text'):
 			lines.append(f'   {str(row.get("error_text"))[:140]}')
@@ -1102,6 +1104,31 @@ def _progress_file(user_id, task_type):
 	return f'progress_{task_type}_{user_id}_{int(time.time())}.json'
 
 
+def _format_parse_source_metrics(row):
+	row = row or {}
+	saved = int(row.get('saved') or 0)
+	comments = int(row.get('comments') or 0)
+	commenters_saved = int(row.get('commenters_saved') or 0)
+	authors_saved = int(row.get('authors_saved') or 0)
+	if 'commenters_saved' in row or 'authors_saved' in row:
+		return f'users {saved}, commenters {commenters_saved}, authors {authors_saved}'
+	return f'users {saved}, comments {comments}'
+
+
+def _format_parse_totals(progress):
+	progress = progress or {}
+	if str(progress.get('parser_mode') or '') == 'engaged_users':
+		return (
+			f'Пользователей: {progress.get("users_parsed", 0)}\n'
+			f'Комментаторы: {progress.get("commenters_saved", 0)}\n'
+			f'Авторы: {progress.get("authors_saved", 0)}'
+		)
+	return (
+		f'Пользователей: {progress.get("users_parsed", 0)}\n'
+		f'Комментариев: {progress.get("comments_parsed", 0)}'
+	)
+
+
 def _format_progress_text(item, progress):
 	mode = progress.get('mode', '')
 	if mode == 'parser':
@@ -1110,8 +1137,7 @@ def _format_progress_text(item, progress):
 			f'Источник: {progress.get("current_source", "-")}\n'
 			f'Аккаунт: {progress.get("active_session", "-")}\n'
 			f'Источники: {progress.get("sources_done", 0)}/{progress.get("sources_total", 0)}\n'
-			f'Пользователей: {progress.get("users_parsed", 0)}\n'
-			f'Комментариев: {progress.get("comments_parsed", 0)}\n'
+			f'{_format_parse_totals(progress)}\n'
 			f'Ошибок: {progress.get("errors", 0)}'
 		)
 		source_results = progress.get('source_results') or []
@@ -1121,7 +1147,7 @@ def _format_progress_text(item, progress):
 				status = 'success' if row.get('status') == 'success' else row.get('error_code') or row.get('status') or '—'
 				lines.append(
 					f'{row.get("source_title") or row.get("source")} — {status}, '
-					f'users {row.get("saved", 0)}, comments {row.get("comments", 0)}'
+					f'{_format_parse_source_metrics(row)}'
 				)
 			text += '\n\nПоследние источники:\n' + '\n'.join(lines[:3])
 		last_error = str(progress.get('last_error', '') or '').strip()
@@ -1233,8 +1259,7 @@ def _queue_worker():
 						f'Источники: {progress.get("sources_done", 0)}/{progress.get("sources_total", 0)}\n'
 						f'Успешно: {max(0, progress.get("sources_done", 0) - progress.get("sources_failed", 0))}\n'
 						f'С ошибками: {progress.get("sources_failed", 0)}\n'
-						f'Пользователей: {progress.get("users_parsed", 0)}\n'
-						f'Комментариев: {progress.get("comments_parsed", 0)}'
+						f'{_format_parse_totals(progress)}'
 					)
 					source_results = progress.get('source_results') or []
 					if source_results:
@@ -1243,7 +1268,7 @@ def _queue_worker():
 							status = 'success' if row.get('status') == 'success' else row.get('error_code') or row.get('status') or '—'
 							lines.append(
 								f'{row.get("source_title") or row.get("source")} — {status}, '
-								f'users {row.get("saved", 0)}, comments {row.get("comments", 0)}'
+								f'{_format_parse_source_metrics(row)}'
 							)
 						text += '\n\nПо источникам:\n' + '\n'.join(lines)
 					last_error = str(progress.get('last_error', '') or '').strip()
@@ -1817,8 +1842,8 @@ def _build_audience_menu():
 def _build_parser_menu():
 	return build_inline_keyboard([
 		[('👥 Участники', 'parser_mode|members'), ('💬 Комментаторы', 'parser_mode|commenters')],
-		[('📝 Авторы', 'parser_mode|message_authors'), ('📂 Импорт', 'parser_mode|import_file')],
-		[('✍️ Вручную', 'parser_mode|manual_add')],
+		[('📝 Авторы', 'parser_mode|message_authors'), ('⚡ Активность', 'parser_mode|engaged_users')],
+		[('📂 Импорт', 'parser_mode|import_file'), ('✍️ Вручную', 'parser_mode|manual_add')],
 		[('📋 Задачи', 'parse_tasks_list|0'), ('🔁 Повторить', 'parser_repeat_last')],
 		[('⬅️ Назад', 'main_menu')],
 	])
@@ -1862,6 +1887,7 @@ def _parser_mode_title(mode):
 		'members': 'Участники',
 		'commenters': 'Комментаторы',
 		'message_authors': 'Авторы',
+		'engaged_users': 'Активность',
 		'import_file': 'Импорт',
 		'manual_add': 'Вручную',
 	}.get(str(mode or '').strip(), str(mode or '-'))
@@ -2884,7 +2910,7 @@ def _queue_parser_job(message, state):
 	]
 	if parse_mode == 'members':
 		command += ['--members-limit', str(int(state.get('members_limit') or _setting_int('parser_posts_limit')))]
-	elif parse_mode == 'commenters':
+	elif parse_mode in ('commenters', 'engaged_users'):
 		command += [
 			'--posts-limit', str(int(state.get('posts_limit') or _setting_int('parser_posts_limit'))),
 			'--comments-limit', str(int(state.get('comments_limit') or _setting_int('parser_comments_limit'))),
@@ -2947,7 +2973,7 @@ def _queue_parser_task_from_record(chat_id, task, panel_msg_id=None):
 	]
 	if parse_mode == 'members':
 		command += ['--members-limit', str(int(meta.get('members_limit') or _setting_int('parser_posts_limit')))]
-	elif parse_mode == 'commenters':
+	elif parse_mode in ('commenters', 'engaged_users'):
 		command += [
 			'--posts-limit', str(int(meta.get('posts_limit') or _setting_int('parser_posts_limit'))),
 			'--comments-limit', str(int(meta.get('comments_limit') or _setting_int('parser_comments_limit'))),
@@ -3023,7 +3049,7 @@ def parser_step_sources(message):
 		state,
 		f'🔎 <b>Парсинг • Шаг 2/3</b>\n'
 		f'Режим: <b>{_parser_mode_title(parse_mode)}</b>\n'
-		f'Выбери глубину анализа по постам.\n'
+		f'{"Выбери глубину анализа по постам и сообщениям." if parse_mode == "engaged_users" else "Выбери глубину анализа по постам."}\n'
 		f'Рекомендация: <b>{_setting_int("parser_posts_limit")}</b>.',
 		parser_step_posts
 	)
@@ -3069,7 +3095,7 @@ def parser_step_posts(message):
 		message.chat.id,
 		state,
 		f'🔎 <b>Парсинг • Шаг 3/3</b>\n'
-		f'Укажи лимит комментариев на источник.\n'
+		f'{"Укажи лимит комментариев на источник. Авторы сообщений будут собраны по лимиту из прошлого шага." if (state.get("parse_mode") or "members") == "engaged_users" else "Укажи лимит комментариев на источник."}\n'
 		f'Рекомендация: <b>{_setting_int("parser_comments_limit")}</b>.',
 		parser_step_comments
 	)

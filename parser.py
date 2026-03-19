@@ -198,6 +198,56 @@ async def parse_message_authors(client, target_entity, target_label, messages_li
     return stats
 
 
+def _merge_parse_stats(base, child):
+    for key in ['found', 'saved', 'skipped', 'legacy_saved']:
+        base[key] = int(base.get(key, 0) or 0) + int(child.get(key, 0) or 0)
+    return base
+
+
+async def parse_engaged_users(client, target_entity, target_label, posts_limit, comments_limit, messages_limit=None, parse_task_id=None, source_id=None):
+    stats = {
+        'found': 0,
+        'saved': 0,
+        'skipped': 0,
+        'legacy_saved': 0,
+        'commenters_found': 0,
+        'commenters_saved': 0,
+        'commenters_skipped': 0,
+        'comments_count': 0,
+        'authors_found': 0,
+        'authors_saved': 0,
+        'authors_skipped': 0,
+    }
+    comment_stats = await parse_comments(
+        client,
+        target_entity,
+        target_label,
+        posts_limit,
+        comments_limit,
+        parse_task_id=parse_task_id,
+        source_id=source_id,
+    )
+    _merge_parse_stats(stats, comment_stats)
+    stats['commenters_found'] = int(comment_stats.get('found') or 0)
+    stats['commenters_saved'] = int(comment_stats.get('saved') or 0)
+    stats['commenters_skipped'] = int(comment_stats.get('skipped') or 0)
+    stats['comments_count'] = int(comment_stats.get('legacy_saved') or 0)
+
+    author_stats = await parse_message_authors(
+        client,
+        target_entity,
+        target_label,
+        messages_limit=messages_limit or posts_limit,
+        parse_task_id=parse_task_id,
+        source_id=source_id,
+    )
+    _merge_parse_stats(stats, author_stats)
+    stats['authors_found'] = int(author_stats.get('found') or 0)
+    stats['authors_saved'] = int(author_stats.get('saved') or 0)
+    stats['authors_skipped'] = int(author_stats.get('skipped') or 0)
+    return stats
+
+
 def _source_target_type(parsed_target):
     target_type = str(getattr(parsed_target, 'target_type', '') or '')
     if target_type in {'private_invite', 'joinchat_invite'}:
@@ -271,6 +321,17 @@ async def parse_target_with_client(client, parsed_target, mode, posts_limit, com
             parse_task_id=parse_task_id,
             source_id=(source or {}).get('id'),
         )
+    elif mode == 'engaged_users':
+        stats = await parse_engaged_users(
+            client,
+            entity,
+            target_label,
+            posts_limit,
+            comments_limit,
+            messages_limit=messages_limit or posts_limit,
+            parse_task_id=parse_task_id,
+            source_id=(source or {}).get('id'),
+        )
     else:
         raise RuntimeError(f'Unsupported parse mode: {mode}')
     logger.info(
@@ -322,6 +383,8 @@ async def run_parser(
         'total_found': 0,
         'total_saved': 0,
         'total_skipped': 0,
+        'commenters_saved': 0,
+        'authors_saved': 0,
         'errors': 0,
         'current_source': '',
         'active_session': '',
@@ -337,6 +400,8 @@ async def run_parser(
     total_saved = 0
     total_skipped = 0
     total_legacy_saved = 0
+    total_commenters_saved = 0
+    total_authors_saved = 0
     source_results = []
     for idx, parsed_target in enumerate(targets):
         source_label = parsed_target.display_value
@@ -374,6 +439,8 @@ async def run_parser(
             total_saved += int(stats.get('saved') or 0)
             total_skipped += int(stats.get('skipped') or 0)
             total_legacy_saved += int(stats.get('legacy_saved') or 0)
+            total_commenters_saved += int(stats.get('commenters_saved') or 0)
+            total_authors_saved += int(stats.get('authors_saved') or 0)
             source_result.update(
                 {
                     'status': 'success',
@@ -381,6 +448,8 @@ async def run_parser(
                     'skipped': int(stats.get('skipped') or 0),
                     'found': int(stats.get('found') or 0),
                     'comments': int(stats.get('legacy_saved') or 0),
+                    'commenters_saved': int(stats.get('commenters_saved') or 0),
+                    'authors_saved': int(stats.get('authors_saved') or 0),
                     'source_title': stats.get('source_title') or source_label,
                     'source_id': stats.get('source_id'),
                     'join_status': stats.get('join_status') or '',
@@ -407,6 +476,8 @@ async def run_parser(
         progress['total_found'] = total_found
         progress['total_saved'] = total_saved
         progress['total_skipped'] = total_skipped
+        progress['commenters_saved'] = total_commenters_saved
+        progress['authors_saved'] = total_authors_saved
         source_results.append(source_result)
         progress['source_results'] = source_results[-8:]
         if task_id:
@@ -442,7 +513,7 @@ async def run_parser(
 
 if __name__ == '__main__':
     p = argparse.ArgumentParser(description='Telegram parser: audience normalization worker')
-    p.add_argument('--mode', default='members', choices=['members', 'commenters', 'message_authors'])
+    p.add_argument('--mode', default='members', choices=['members', 'commenters', 'message_authors', 'engaged_users'])
     p.add_argument('--target', default='', help='Single source chat/channel (@name or name)')
     p.add_argument('--targets-file', default='', help='File with source chats/channels (one per line)')
     p.add_argument('--members-limit', type=int, default=0)
