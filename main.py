@@ -489,14 +489,18 @@ def _communities_text():
 
 def _audience_text():
 	summary = AUDIENCE_REPO.summary()
+	total = summary.get('total', 0)
+	with_username = summary.get('with_username', 0)
+	blacklisted = summary.get('blacklisted', 0)
+	unsub = summary.get('unsubscribed', 0)
 	return build_section_screen(
 		'👥 Аудитория',
 		stats=[
 			('Всего', summary.get('total', 0), ' 👤'),
 			('Сегодня', summary.get('today_found', 0), ' ✨'),
-			('Username', summary.get('with_username', 0), ' @'),
-			('Blacklisted', summary.get('blacklisted', 0), ' 🚫'),
-			('Unsub', summary.get('unsubscribed', 0), ' ❌'),
+			('Username', f'{with_username} ({_pct(with_username, total)}%)', ' @'),
+			('Blacklisted', f'{blacklisted} ({_pct(blacklisted, total)}%)', ' 🚫'),
+			('Unsub', f'{unsub} ({_pct(unsub, total)}%)', ' ❌'),
 			('Сегменты', len(SEGMENT_REPO.list(limit=1000))),
 		],
 		description='Управление базой пользователей: сегменты, фильтры, очистка.'
@@ -838,6 +842,7 @@ def _build_account_card_keyboard(account_index, page=0):
 def _audience_list_text(page=0, filters=None):
 	rows = _audience_rows(filters=filters)
 	items, page, total_pages = _slice_page(rows, page, AUDIENCE_PAGE_SIZE)
+	total = len(rows)
 	text = build_list_page(
 		'👥 Аудитория',
 		page,
@@ -854,6 +859,8 @@ def _audience_list_text(page=0, filters=None):
 	)
 	if filters:
 		text += f'\n\nФильтр: <code>{_audience_filter_summary(filters)}</code>'
+	if not _is_compact_mode():
+		text += f'\n\nСтраница {page + 1}/{total_pages} · Всего после фильтра: {total}'
 	return text
 
 
@@ -2111,6 +2118,21 @@ def _parse_bool_value(value):
 	return str(value or '').strip().lower() in ['1', 'true', 'yes', 'on', 'y']
 
 
+def _pct(part, total):
+	part = float(part or 0)
+	total = float(total or 0)
+	if total <= 0:
+		return 0.0
+	return round(100.0 * part / total, 1)
+
+
+def _bar(part, total, width=14, filled='▮', empty='▯'):
+	p = _pct(part, total)
+	filled_len = int(round(width * p / 100.0))
+	filled_len = max(0, min(width, filled_len))
+	return filled * filled_len + empty * (width - filled_len) + f' {p}%'
+
+
 def _import_users_from_bytes(filename, data):
 	name = str(filename or '').lower()
 	if name.endswith('.csv'):
@@ -2535,6 +2557,7 @@ def _audience_clear_text():
 		highlights=[
 			'Очистка затрагивает только audience_users.',
 			'Связанные копии в users остаются нетронутыми.',
+			'Используй фильтр перед точечной очисткой.',
 		],
 		footer='Выбери режим очистки.',
 	)
@@ -2600,15 +2623,21 @@ def _stats_text():
 		audience = AUDIENCE_REPO.summary()
 		total_campaigns = len(campaigns)
 		total_requests = len(join_requests)
-		conversion = 0
-		if total_stats.get('sent', 0):
-			conversion = round((total_stats.get('approved', 0) + total_stats.get('joined', 0)) * 100 / max(1, total_stats.get('sent', 0)))
-		highlights = [
+		sent = total_stats.get('sent', 0)
+		delivered = total_stats.get('delivered', sent)
+		approved = total_stats.get('approved', 0)
+		joined = total_stats.get('joined', 0)
+		ok = approved + joined
+		conversion = _pct(ok, delivered)
+		approval_rate = _pct(approved, delivered)
+		join_rate = _pct(joined, delivered)
+		waiting = jr_status.get('pending', 0)
+		highlights = [] if _is_compact_mode() else [
 			f'Парсинг: {parse_summary.get("total_saved", 0)} сохранено',
-			f'Отправлено: {total_stats.get("sent", 0)}',
-			f'Одобрено: {total_stats.get("approved", 0)}',
-			f'Вступили: {total_stats.get("joined", 0)}',
-			f'Ожидают: {jr_status.get("pending", 0)}',
+			f'Отправлено: {sent}',
+			f'Одобрено: {approved} ({approval_rate}%)',
+			f'Вступили: {joined} ({join_rate}%)',
+			f'Ожидают: {waiting}',
 		]
 		return build_status_screen(
 			'📊 Аналитика',
@@ -2616,7 +2645,9 @@ def _stats_text():
 				('Аудитория', audience.get('total', 0)),
 				('Кампании', total_campaigns),
 				('Заявки', total_requests),
-				('Конверсия', f'{conversion}%'),
+				('Конверсия', _bar(ok, delivered)),
+				('Одобрения', _bar(approved, delivered)),
+				('Вступили', _bar(joined, delivered)),
 			],
 			highlights=[] if _is_compact_mode() else highlights,
 		)
@@ -5457,7 +5488,7 @@ def podcategors(call):
 		return
 
 	if call.data == 'stats_overview':
-		_render_inline(call.message.chat.id, call.message.message_id, _stats_text(), reply_markup=build_new_menu(), parse_mode='HTML')
+		_render_inline(call.message.chat.id, call.message.message_id, _stats_overview_text(), reply_markup=build_new_menu(), parse_mode='HTML')
 		return
 
 	if call.data == 'help_new':
