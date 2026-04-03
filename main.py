@@ -128,6 +128,8 @@ DEFAULT_APP_SETTINGS = {
 	'accounts_auto_delete_inactive': '0',
 	'interface_mode': 'pro',
 	'active_preset': 'standard',
+	'keyword_search_limit': '20',
+	'keyword_post_delay': '60',
 }
 PRESET_CONFIGS = {
 	'super_safe': {
@@ -942,7 +944,17 @@ def _parse_task_sources_count(task):
 	source_reports = task.get('source_report_json') or []
 	if source_reports:
 		return len(source_reports)
-	sources = str((task.get('meta_json') or {}).get('sources') or task.get('source_value') or '').strip()
+	mode = str(task.get('mode') or '').strip()
+	meta = task.get('meta_json') or {}
+	if mode == 'keyword_search':
+		keywords_value = meta.get('keywords') if meta else None
+		if isinstance(keywords_value, list):
+			keywords_raw = '\n'.join([str(x) for x in keywords_value])
+		else:
+			keywords_raw = str(keywords_value or task.get('source_value') or '')
+		keywords_raw = keywords_raw.replace(',', '\n')
+		return len([row for row in keywords_raw.splitlines() if str(row).strip()])
+	sources = str(meta.get('sources') or task.get('source_value') or '').strip()
 	return len([row for row in sources.splitlines() if str(row).strip()])
 
 
@@ -1029,6 +1041,9 @@ def _parse_task_sources_text(task_id):
 			lines.append(f'Комментаторы: <b>{int(row.get("commenters_saved") or 0)}</b>')
 			lines.append(f'Уникальных: <b>{int(row.get("unique_users") or row.get("saved") or 0)}</b>')
 			lines.append(f'Дубликатов: <b>{int(row.get("duplicates") or 0)}</b>')
+		elif task.get('mode') == 'keyword_search':
+			lines.append(f'Вступили: <b>{"Да" if row.get("joined") else "Нет"}</b>')
+			lines.append(f'Отправлено: <b>{"Да" if row.get("posted") else "Нет"}</b>')
 		else:
 			lines.append(f'Пользователи: <b>{int(row.get("saved") or 0)}</b>')
 			lines.append(f'Комментарии: <b>{int(row.get("comments") or 0)}</b>')
@@ -1519,6 +1534,8 @@ def _format_parse_source_metrics(row):
 	row = row or {}
 	saved = int(row.get('saved') or 0)
 	comments = int(row.get('comments') or 0)
+	if 'joined' in row or 'posted' in row:
+		return f'joined {int(bool(row.get("joined")))} / posted {int(bool(row.get("posted")))}'
 	commenters_saved = int(row.get('commenters_saved') or 0)
 	authors_saved = int(row.get('authors_saved') or 0)
 	unique_users = int(row.get('unique_users') or 0)
@@ -1567,6 +1584,20 @@ def _format_progress_text(item, progress):
 					f'{_format_parse_source_metrics(row)}'
 				)
 			text += '\n\nПоследние источники:\n' + '\n'.join(lines[:3])
+		last_error = str(progress.get('last_error', '') or '').strip()
+		if last_error:
+			text += f'\nПоследняя ошибка: {last_error[:300]}'
+		return text
+	if mode == 'keyword_search':
+		text = (
+			f'🔍 Поиск чатов\n'
+			f'Ключ: {progress.get("current_keyword", "-")}\n'
+			f'Аккаунт: {progress.get("active_session", "-")}\n'
+			f'Ключей: {progress.get("keywords_done", 0)}/{progress.get("keywords_total", 0)}\n'
+			f'Найдено: {progress.get("found_total", 0)} | Сохранено: {progress.get("saved_total", 0)}\n'
+			f'Вступили: {progress.get("joined_total", 0)} | Отправлено: {progress.get("posted_total", 0)}\n'
+			f'Ошибок: {progress.get("errors", 0)}'
+		)
 		last_error = str(progress.get('last_error', '') or '').strip()
 		if last_error:
 			text += f'\nПоследняя ошибка: {last_error[:300]}'
@@ -1721,6 +1752,25 @@ def _queue_worker():
 						if last_text:
 							text += f'\n{last_text[:600]}'
 					_render_inline(item['user_id'], msg_id, text, parse_mode=None)
+				elif progress.get('mode') == 'keyword_search':
+					task_id = progress.get('parse_task_id')
+					text = (
+						f'✅ Завершено: {item["title"]}\n'
+						f'Код: {code}\n'
+						f'Ключей: {progress.get("keywords_done", 0)}/{progress.get("keywords_total", 0)}\n'
+						f'Найдено: {progress.get("found_total", 0)} | Сохранено: {progress.get("saved_total", 0)}\n'
+						f'Вступили: {progress.get("joined_total", 0)} | Отправлено: {progress.get("posted_total", 0)}\n'
+						f'Ошибок: {progress.get("errors", 0)}'
+					)
+					last_error = str(progress.get('last_error', '') or '').strip()
+					if last_error:
+						text += f'\n\nПоследняя ошибка:\n{last_error[:800]}'
+					reply_markup = None
+					if task_id:
+						reply_markup = build_inline_keyboard([
+							[('📄 Детали', f'parse_task_view|{task_id}|0'), ('🔄 Повторить', f'parse_task_repeat|{task_id}|0')],
+						])
+					_render_inline(item['user_id'], msg_id, text, parse_mode=None, reply_markup=reply_markup)
 				else:
 					_render_inline(item['user_id'], msg_id, f'✅ Завершено: {item["title"]}\nКод: {code}', parse_mode=None)
 			else:
@@ -2270,6 +2320,7 @@ def _build_parser_menu():
 		[('👥 Участники', 'parser_mode|members'), ('💬 Комментаторы', 'parser_mode|commenters')],
 		[('📝 Авторы', 'parser_mode|message_authors'), ('⚡ Активность', 'parser_mode|engaged_users')],
 		[('📂 Импорт', 'parser_mode|import_file'), ('✍️ Вручную', 'parser_mode|manual_add')],
+		[('🔍 Поиск чатов', 'parser_mode|keyword_search')],
 		[('📋 Задачи', 'parse_tasks_list|0'), ('🔁 Повторить', 'parser_repeat_last')],
 		[('⬅️ Назад', 'main_menu')],
 	])
@@ -2312,11 +2363,12 @@ def _parser_mode_title(mode):
 	return {
 		'members': 'Участники',
 		'commenters': 'Комментаторы',
-		'message_authors': 'Авторы',
-		'engaged_users': 'Активность',
-		'import_file': 'Импорт',
-		'manual_add': 'Вручную',
-	}.get(str(mode or '').strip(), str(mode or '-'))
+	'message_authors': 'Авторы',
+	'engaged_users': 'Активность',
+	'import_file': 'Импорт',
+	'manual_add': 'Вручную',
+	'keyword_search': 'Поиск чатов',
+}.get(str(mode or '').strip(), str(mode or '-'))
 
 
 def _parse_segment_filter_text(text):
@@ -3364,6 +3416,65 @@ def _queue_parser_job(message, state):
 	)
 
 
+def _queue_keyword_search_job(message, state):
+	file_name, keywords_count = _save_targets_file(message.chat.id, state.get('keywords', ''), 'keyword_search')
+	if keywords_count == 0:
+		bot.send_message(message.chat.id, '⚠️ Не нашёл ключевые слова. Запусти поиск заново.', reply_markup=build_new_menu())
+		return
+	search_limit = int(state.get('search_limit') or _setting_int('keyword_search_limit'))
+	post_text = state.get('post_text') or ''
+	post_image = state.get('post_image') or ''
+	post_delay = int(state.get('post_delay') or 0)
+	task_meta = {
+		'keywords': str(state.get('keywords') or '').strip(),
+		'search_limit': search_limit,
+		'post_text': post_text,
+		'post_image': post_image,
+		'post_delay': post_delay,
+		'use_all_sessions': _setting_bool('parser_use_all_sessions'),
+	}
+	task = PARSE_TASK_REPO.create(
+		mode='keyword_search',
+		source_type='keyword',
+		source_value=str(state.get('keywords') or '').strip(),
+		status='queued',
+		created_by=message.chat.id,
+		meta_json=task_meta,
+	)
+	command = [
+		sys.executable, os.path.join('workers', 'keyword_search_worker.py'),
+		'--keywords-file', file_name,
+		'--task-id', str(task.get('id')),
+		'--search-limit', str(search_limit),
+		'--post-delay', str(post_delay),
+	]
+	if post_text:
+		command += ['--post-text', post_text]
+	if post_image:
+		command += ['--post-image', post_image]
+	if _setting_bool('parser_use_all_sessions'):
+		command.append('--use-all-sessions')
+	progress_file = _progress_file(message.chat.id, 'keyword_search')
+	command += ['--progress-file', progress_file]
+	queue_pos = _enqueue_process(message.chat.id, f'keyword search ({keywords_count} keys)', command, progress_file=progress_file)
+	USER_STATE.pop(message.chat.id, None)
+	summary_lines = [
+		f'Task ID: <b>{task.get("id")}</b>',
+		f'Ключевых слов: <b>{keywords_count}</b>',
+		f'Лимит на слово: <b>{search_limit}</b>',
+		f'Отправка: <b>{"да" if (post_text or post_image) else "нет"}</b>',
+	]
+	if post_text or post_image:
+		summary_lines.append(f'Задержка перед отправкой: <b>{post_delay} сек</b>')
+	_render_inline(
+		message.chat.id,
+		state.get('panel_msg_id'),
+		'✅ <b>Поиск чатов поставлен в очередь</b>\n' + '\n'.join(f'• {line}' for line in summary_lines) + f'\n• Позиция: <b>~{queue_pos}</b>\nСтатус появится в live-progress.',
+		parse_mode='HTML',
+		reply_markup=build_new_menu()
+	)
+
+
 def _queue_parser_task_from_record(chat_id, task, panel_msg_id=None):
 	task = task or {}
 	meta = task.get('meta_json') or {}
@@ -3379,6 +3490,62 @@ def _queue_parser_task_from_record(chat_id, task, panel_msg_id=None):
 		)
 		return
 	parse_mode = str(meta.get('parse_mode') or task.get('mode') or 'members').strip()
+	if parse_mode == 'keyword_search':
+		keywords_value = meta.get('keywords') if meta else None
+		if isinstance(keywords_value, list):
+			keywords_raw = '\n'.join([str(x) for x in keywords_value])
+		else:
+			keywords_raw = str(keywords_value or sources or '').strip()
+		file_name, keywords_count = _save_targets_file(chat_id, keywords_raw, 'keyword_search_repeat')
+		if keywords_count == 0:
+			_render_inline(
+				chat_id,
+				panel_msg_id,
+				build_confirm_screen('🔄 Повтор поиска', summary='Ключевые слова не найдены.'),
+				reply_markup=_build_parser_menu(),
+				parse_mode='HTML'
+			)
+			return
+		repeat_task = PARSE_TASK_REPO.create(
+			mode=parse_mode,
+			source_type=task.get('source_type') or 'keyword',
+			source_value=keywords_raw,
+			status='queued',
+			created_by=chat_id,
+			meta_json=meta,
+		)
+		command = [
+			sys.executable, os.path.join('workers', 'keyword_search_worker.py'),
+			'--keywords-file', file_name,
+			'--task-id', str(repeat_task.get('id')),
+			'--search-limit', str(int(meta.get('search_limit') or _setting_int('keyword_search_limit'))),
+			'--post-delay', str(int(meta.get('post_delay') or 0)),
+		]
+		if meta.get('post_text'):
+			command += ['--post-text', str(meta.get('post_text'))]
+		if meta.get('post_image'):
+			command += ['--post-image', str(meta.get('post_image'))]
+		if bool(meta.get('use_all_sessions')):
+			command.append('--use-all-sessions')
+		progress_file = _progress_file(chat_id, 'keyword_search')
+		command += ['--progress-file', progress_file]
+		queue_pos = _enqueue_process(chat_id, f'keyword search ({keywords_count} keys)', command, progress_file=progress_file)
+		_render_inline(
+			chat_id,
+			panel_msg_id,
+			build_confirm_screen(
+				'🔄 Поиск чатов повторён',
+				summary=[
+					f'Task ID: {repeat_task.get("id")}',
+					f'Ключевых слов: {keywords_count}',
+					f'Лимит на слово: {meta.get("search_limit", _setting_int("keyword_search_limit"))}',
+					f'Позиция: ~{queue_pos}',
+				],
+			),
+			reply_markup=build_new_menu(),
+			parse_mode='HTML'
+		)
+		return
 	repeat_task = PARSE_TASK_REPO.create(
 		mode=parse_mode,
 		source_type=task.get('source_type') or 'chat',
@@ -3438,6 +3605,21 @@ def parser_step_sources(message):
 		return
 	state['sources'] = message.text
 	parse_mode = state.get('parse_mode') or 'members'
+	if parse_mode == 'keyword_search':
+		state['keywords'] = message.text
+		state['stage'] = 'search_limit'
+		USER_STATE[message.chat.id] = state
+		_prompt_step(
+			message.chat.id,
+			state,
+			f'🔍 <b>Поиск чатов • Шаг 2/4</b>\n'
+			f'Ключевые слова:\n<code>{message.text.strip()}</code>\n\n'
+			f'Укажи лимит результатов на каждое слово.\n'
+			f'Рекомендация: <b>{_setting_int("keyword_search_limit")}</b>.\n'
+			'Например: 15',
+			parser_keyword_step_limit
+		)
+		return
 	if parse_mode == 'members':
 		state['stage'] = 'members_limit'
 		USER_STATE[message.chat.id] = state
@@ -3558,6 +3740,110 @@ def parser_step_messages_limit(message):
 	except (TypeError, ValueError):
 		state['messages_limit'] = _setting_int('parser_posts_limit')
 	_queue_parser_job(message, state)
+
+
+def parser_keyword_step_limit(message):
+	if not _is_admin(message.chat.id):
+		_deny_access(message.chat.id)
+		return
+	state = USER_STATE.get(message.chat.id, {})
+	if state.get('flow') != 'parser' or state.get('parse_mode') != 'keyword_search':
+		return
+	if _is_cancel(message.text):
+		USER_STATE.pop(message.chat.id, None)
+		bot.send_message(message.chat.id, '❌ Действие отменено.', reply_markup=build_new_menu())
+		return
+	try:
+		state['search_limit'] = int(message.text.strip())
+	except (TypeError, ValueError):
+		state['search_limit'] = _setting_int('keyword_search_limit')
+	state['stage'] = 'search_message'
+	USER_STATE[message.chat.id] = state
+	_prompt_step(
+		message.chat.id,
+		state,
+		'📝 <b>Поиск чатов • Шаг 3/4</b>\n'
+		'Введи текст, который нужно отправить в найденные чаты после вступления.\n'
+		'Если не нужно отправлять текст — напиши <code>нет</code> или оставь пусто.\n\n'
+		'Можно добавить плейсхейдеры Telegram (без форматирования).',
+		parser_keyword_step_message
+	)
+
+
+def parser_keyword_step_message(message):
+	if not _is_admin(message.chat.id):
+		_deny_access(message.chat.id)
+		return
+	state = USER_STATE.get(message.chat.id, {})
+	if state.get('flow') != 'parser' or state.get('parse_mode') != 'keyword_search':
+		return
+	if _is_cancel(message.text):
+		USER_STATE.pop(message.chat.id, None)
+		bot.send_message(message.chat.id, '❌ Действие отменено.', reply_markup=build_new_menu())
+		return
+	raw_text = str(message.text or '').strip()
+	if raw_text.lower() in ['нет', 'no', 'none']:
+		raw_text = ''
+	state['post_text'] = raw_text
+	state['stage'] = 'search_image'
+	USER_STATE[message.chat.id] = state
+	_prompt_step(
+		message.chat.id,
+		state,
+		'🖼 <b>Поиск чатов • Шаг 4/4</b>\n'
+		'Пришли ссылку на картинку/файл или путь к локальному файлу. Если картинка не нужна — напиши <code>нет</code>.\n'
+		'После этого укажу задержку перед отправкой.',
+		parser_keyword_step_image
+	)
+
+
+def parser_keyword_step_image(message):
+	if not _is_admin(message.chat.id):
+		_deny_access(message.chat.id)
+		return
+	state = USER_STATE.get(message.chat.id, {})
+	if state.get('flow') != 'parser' or state.get('parse_mode') != 'keyword_search':
+		return
+	if _is_cancel(message.text):
+		USER_STATE.pop(message.chat.id, None)
+		bot.send_message(message.chat.id, '❌ Действие отменено.', reply_markup=build_new_menu())
+		return
+	raw_image = str(message.text or '').strip()
+	if raw_image.lower() in ['нет', 'no', 'none', ''] :
+		raw_image = ''
+	state['post_image'] = raw_image
+	if not state.get('post_text') and not state.get('post_image'):
+		state['post_delay'] = 0
+		_queue_keyword_search_job(message, state)
+		return
+	state['stage'] = 'search_delay'
+	USER_STATE[message.chat.id] = state
+	_prompt_step(
+		message.chat.id,
+		state,
+		f'⏱ <b>Поиск чатов</b>\n'
+		f'Укажи задержку (в секундах) перед отправкой сообщения после вступления.\n'
+		f'Рекомендация: <b>{_setting_int("keyword_post_delay")}</b>.',
+		parser_keyword_step_delay
+	)
+
+
+def parser_keyword_step_delay(message):
+	if not _is_admin(message.chat.id):
+		_deny_access(message.chat.id)
+		return
+	state = USER_STATE.get(message.chat.id, {})
+	if state.get('flow') != 'parser' or state.get('parse_mode') != 'keyword_search':
+		return
+	if _is_cancel(message.text):
+		USER_STATE.pop(message.chat.id, None)
+		bot.send_message(message.chat.id, '❌ Действие отменено.', reply_markup=build_new_menu())
+		return
+	try:
+		state['post_delay'] = int(str(message.text).strip())
+	except (TypeError, ValueError):
+		state['post_delay'] = _setting_int('keyword_post_delay')
+	_queue_keyword_search_job(message, state)
 
 
 def join_target_step_target(message):
@@ -4800,6 +5086,30 @@ def podcategors(call):
 				audience_add_step_tg_id
 			)
 			return
+		if parse_mode == 'keyword_search':
+			if _has_active_flow(call.message.chat.id):
+				cur = USER_STATE.get(call.message.chat.id, {}).get('flow')
+				_render_inline(
+					call.message.chat.id,
+					call.message.message_id,
+					f'⚠️ Уже активен сценарий: <b>{_flow_title(cur)}</b>.\nЧтобы начать новый, сначала отмени текущий.',
+					parse_mode='HTML',
+					reply_markup=_step_keyboard()
+				)
+				return
+			if not _ensure_sessions_or_warn(call.message.chat.id, call.message.message_id):
+				return
+			state = {'flow': 'parser', 'stage': 'sources', 'panel_msg_id': call.message.message_id, 'parse_mode': parse_mode}
+			USER_STATE[call.message.chat.id] = state
+			_prompt_step(
+				call.message.chat.id,
+				state,
+				'🔍 <b>Поиск чатов</b>\n\n'
+				'Введи ключевые слова (через запятую или с новой строки).\n'
+				'Буду искать публичные чаты/каналы, вступать аккаунтом и при необходимости отправлять сообщение с картинкой.',
+				parser_step_sources
+			)
+			return
 		if _has_active_flow(call.message.chat.id):
 			cur = USER_STATE.get(call.message.chat.id, {}).get('flow')
 			_render_inline(
@@ -4893,6 +5203,8 @@ def podcategors(call):
 						)
 					elif p.get('mode') == 'inviter':
 						extra = f' | invited={p.get("invited", 0)} processed={p.get("processed", 0)}'
+					elif p.get('mode') == 'keyword_search':
+						extra = f' | found={p.get("found_total", 0)} joined={p.get("joined_total", 0)}'
 				except Exception:
 					extra = ''
 			lines.append(f'{idx}. {item["title"]} - {status} - {pid_text}{extra}')
