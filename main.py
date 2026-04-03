@@ -492,11 +492,14 @@ def _audience_text():
 	return build_section_screen(
 		'👥 Аудитория',
 		stats=[
-			('Всего', summary.get('total', 0)),
+			('Всего', summary.get('total', 0), ' 👤'),
+			('Сегодня', summary.get('today_found', 0), ' ✨'),
+			('Username', summary.get('with_username', 0), ' @'),
+			('Blacklisted', summary.get('blacklisted', 0), ' 🚫'),
+			('Unsub', summary.get('unsubscribed', 0), ' ❌'),
 			('Сегменты', len(SEGMENT_REPO.list(limit=1000))),
-			('Blacklisted', summary.get('blacklisted', 0)),
 		],
-		description='Управление базой пользователей.'
+		description='Управление базой пользователей: сегменты, фильтры, очистка.'
 	)
 
 
@@ -753,7 +756,7 @@ def _accounts_text():
 		description='Управление аккаунтами и сессиями.',
 		footer=(
 			f'Автоочистка неактивных: {"вкл" if _auto_delete_inactive_enabled() else "выкл"}.\n'
-			'Удаляются только dead и invalid. Ограниченные и Flood не трогаются.'
+			'Удаляем dead/invalid/banned/session_invalid автоматически.'
 		)
 	)
 
@@ -844,6 +847,7 @@ def _audience_list_text(page=0, filters=None):
 				'badge': '🚫' if item.get('is_blacklisted') else '🟢',
 				'primary': item.get('first_name') or item.get('username') or item.get('telegram_user_id'),
 				'secondary': f'{_format_username(item.get("username"))} · {item.get("source_value") or "—"}',
+				'meta': f'id:{item.get("telegram_user_id") or "-"} • consent:{item.get("consent_status") or "-"} • tags:{len(item.get("tags_json") or [])}',
 			}
 			for item in items
 		]
@@ -2312,7 +2316,7 @@ def _build_audience_menu():
 		[('📋 Список', 'audience_list'), ('🔎 Поиск', 'audience_search_start')],
 		[('🧭 Фильтр', 'audience_filters_menu'), ('🏷 Сегменты', 'segments_menu')],
 		[('🚫 Blacklist', 'audience_blacklist_list'), ('📤 Экспорт', 'audience_export')],
-		[('📂 Импорт', 'audience_import_start')],
+		[('📂 Импорт', 'audience_import_start'), ('🧹 Очистка', 'audience_clear_menu')],
 		[('⬅️ Назад', 'main_menu')],
 	])
 
@@ -2520,6 +2524,29 @@ def _audience_filters_text(user_id):
 		],
 		highlights=highlights,
 	)
+
+
+def _audience_clear_text():
+	return build_status_screen(
+		'🧹 Очистка аудитории',
+		stats=[
+			('Всего', AUDIENCE_REPO.summary().get('total', 0)),
+		],
+		highlights=[
+			'Очистка затрагивает только audience_users.',
+			'Связанные копии в users остаются нетронутыми.',
+		],
+		footer='Выбери режим очистки.',
+	)
+
+
+def _build_audience_clear_menu():
+	return build_inline_keyboard([
+		[('🎯 По фильтру', 'audience_clear_filter')],
+		[('📂 По источнику', 'audience_clear_source')],
+		[('🔥 Полностью', 'audience_clear_all')],
+		[('⬅️ Назад', 'audience_menu')],
+	])
 
 
 def _build_audience_filters_menu():
@@ -3177,6 +3204,36 @@ def audience_filter_source_step(message):
 		_audience_list_text(0, filters=filters),
 		parse_mode='HTML',
 		reply_markup=_build_audience_list_keyboard(0, filters=filters)
+	)
+
+
+def audience_clear_source_step(message):
+	if not _is_admin(message.chat.id):
+		_deny_access(message.chat.id)
+		return
+	state = USER_STATE.get(message.chat.id, {})
+	if state.get('flow') != 'audience_clear_source':
+		return
+	if _is_cancel(message.text):
+		USER_STATE.pop(message.chat.id, None)
+		bot.send_message(message.chat.id, '❌ Очистка отменена.', reply_markup=_build_audience_menu())
+		return
+	source_value = str(message.text or '').strip()
+	if not source_value:
+		_prompt_step(
+			message.chat.id,
+			state,
+			'⚠️ Пустое значение. Введи source_value вида <code>@chat</code> или текст.',
+			audience_clear_source_step
+		)
+		return
+	deleted = AUDIENCE_REPO.clear_by_source_value(source_value)
+	USER_STATE.pop(message.chat.id, None)
+	bot.send_message(
+		message.chat.id,
+		f'🧹 Очистка завершена.\nИсточник: <code>{source_value}</code>\nУдалено: <b>{deleted}</b>',
+		parse_mode='HTML',
+		reply_markup=_build_audience_menu()
 	)
 
 
@@ -4297,6 +4354,62 @@ def podcategors(call):
 
 	if call.data == 'audience_menu':
 		_render_inline(call.message.chat.id, call.message.message_id, _audience_text(), parse_mode='HTML', reply_markup=_build_audience_menu())
+		return
+
+	if call.data == 'audience_clear_menu':
+		_render_inline(
+			call.message.chat.id,
+			call.message.message_id,
+			_audience_clear_text(),
+			parse_mode='HTML',
+			reply_markup=_build_audience_clear_menu()
+		)
+		return
+
+	if call.data == 'audience_clear_filter':
+		filters = _get_audience_filters(call.message.chat.id)
+		count = len(_audience_rows(filters=filters))
+		if count == 0:
+			bot.answer_callback_query(call.id, 'Нечего удалять по фильтру')
+			return
+		deleted = AUDIENCE_REPO.clear(filters=filters)
+		bot.send_message(
+			call.message.chat.id,
+			f'🧹 Очистка по фильтру завершена.\nУдалено: <b>{deleted}</b>',
+			parse_mode='HTML',
+			reply_markup=_build_audience_menu()
+		)
+		return
+
+	if call.data == 'audience_clear_all':
+		deleted = AUDIENCE_REPO.clear_all()
+		bot.send_message(
+			call.message.chat.id,
+			f'🔥 Полная очистка завершена.\nУдалено: <b>{deleted}</b>',
+			parse_mode='HTML',
+			reply_markup=_build_audience_menu()
+		)
+		return
+
+	if call.data == 'audience_clear_source':
+		if _has_active_flow(call.message.chat.id):
+			cur = USER_STATE.get(call.message.chat.id, {}).get('flow')
+			_render_inline(
+				call.message.chat.id,
+				call.message.message_id,
+				f'⚠️ Уже активен сценарий: <b>{_flow_title(cur)}</b>.\nЧтобы начать новый, сначала отмени текущий.',
+				parse_mode='HTML',
+				reply_markup=_step_keyboard()
+			)
+			return
+		state = {'flow': 'audience_clear_source', 'panel_msg_id': call.message.message_id}
+		USER_STATE[call.message.chat.id] = state
+		_prompt_step(
+			call.message.chat.id,
+			state,
+			'📂 <b>Очистка по источнику</b>\nВведи source_value (например @chat). Все записи с этим источником будут удалены.',
+			audience_clear_source_step
+		)
 		return
 
 	if call.data == 'audience_filters_menu':

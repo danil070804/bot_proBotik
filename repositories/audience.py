@@ -1,5 +1,7 @@
 from db import (
     blacklist_audience_user,
+    delete_audience_users,
+    delete_all_audience_users,
     get_audience_source,
     get_audience_source_by_key,
     get_audience_summary,
@@ -49,6 +51,15 @@ class AudienceRepository:
 
     def list_sources(self, limit=None):
         return list_audience_sources(limit=limit)
+
+    def clear_all(self):
+        return delete_all_audience_users()
+
+    def clear(self, filters=None):
+        return delete_audience_users(filters=filters)
+
+    def clear_by_source_value(self, source_value):
+        return delete_audience_users(filters={'source_value': source_value})
 
     def upsert(self, sync_user=True, **payload):
         audience_user = upsert_audience_user(**payload)

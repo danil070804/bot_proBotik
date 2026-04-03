@@ -2015,6 +2015,92 @@ def list_audience_users(filters=None, limit=None):
     return result
 
 
+def delete_audience_users(filters=None):
+    filters = dict(filters or {})
+    clauses = []
+    params = []
+    search = str(filters.get('search') or '').strip().lower()
+    if search:
+        like_value = f'%{search}%'
+        search_parts = [
+            f'LOWER(COALESCE(u.username, \'\')) LIKE {"%s" if IS_POSTGRES else "?"}',
+            f'LOWER(COALESCE(u.first_name, \'\')) LIKE {"%s" if IS_POSTGRES else "?"}',
+            f'LOWER(COALESCE(u.last_name, \'\')) LIKE {"%s" if IS_POSTGRES else "?"}',
+        ]
+        search_params = [like_value, like_value, like_value]
+        try:
+            tg_id = int(search)
+            search_parts.append(f'u.telegram_user_id = {"%s" if IS_POSTGRES else "?"}')
+            search_params.append(tg_id)
+        except Exception:
+            pass
+        clauses.append('(' + ' OR '.join(search_parts) + ')')
+        params.extend(search_params)
+    if filters.get('source_id') is not None:
+        clauses.append(f'u.source_id = {"%s" if IS_POSTGRES else "?"}')
+        params.append(int(filters.get('source_id')))
+    if filters.get('parse_task_id') is not None:
+        clauses.append(f'u.parse_task_id = {"%s" if IS_POSTGRES else "?"}')
+        params.append(int(filters.get('parse_task_id')))
+    if filters.get('source_type'):
+        clauses.append(f's.source_type = {"%s" if IS_POSTGRES else "?"}')
+        params.append(str(filters.get('source_type')).strip())
+    if filters.get('source_value'):
+        clauses.append(f's.source_value = {"%s" if IS_POSTGRES else "?"}')
+        params.append(str(filters.get('source_value')).strip())
+    if filters.get('discovered_after'):
+        clauses.append(f'u.discovered_at >= {"%s" if IS_POSTGRES else "?"}')
+        params.append(str(filters.get('discovered_after')).strip())
+    if filters.get('discovered_before'):
+        clauses.append(f'u.discovered_at <= {"%s" if IS_POSTGRES else "?"}')
+        params.append(str(filters.get('discovered_before')).strip())
+    if filters.get('consent_status'):
+        clauses.append(f'u.consent_status = {"%s" if IS_POSTGRES else "?"}')
+        params.append(str(filters.get('consent_status')).strip())
+    if filters.get('tag'):
+        clauses.append(f'COALESCE(u.tags_json, \'\') LIKE {"%s" if IS_POSTGRES else "?"}')
+        params.append(f'%{str(filters.get("tag")).strip()}%')
+    if filters.get('has_username') is True:
+        clauses.append("COALESCE(u.username, '') <> ''")
+    elif filters.get('has_username') is False:
+        clauses.append("COALESCE(u.username, '') = ''")
+    if filters.get('is_blacklisted') is True:
+        clauses.append('u.is_blacklisted = %s' if IS_POSTGRES else 'u.is_blacklisted = ?')
+        params.append(True if IS_POSTGRES else 1)
+    elif filters.get('is_blacklisted') is False:
+        clauses.append('u.is_blacklisted = %s' if IS_POSTGRES else 'u.is_blacklisted = ?')
+        params.append(False if IS_POSTGRES else 0)
+    if filters.get('exclude_unsubscribed'):
+        clauses.append('u.unsubscribed_at IS NULL')
+
+    if IS_POSTGRES:
+        sql_text = 'DELETE FROM audience_users u USING audience_sources s WHERE s.id = u.source_id'
+        if clauses:
+            sql_text += ' AND ' + ' AND '.join(clauses)
+    else:
+        sql_text = 'DELETE FROM audience_users'
+        if clauses:
+            normalized = [clause.replace('u.', 'audience_users.').replace('s.', 's.') for clause in clauses]
+            sql_text += ' WHERE EXISTS (SELECT 1 FROM audience_sources s WHERE s.id = audience_users.source_id AND ' + ' AND '.join(normalized) + ')'
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(sql_text, tuple(params))
+        deleted = cursor.rowcount or 0
+        conn.commit()
+        cursor.close()
+    return deleted
+
+
+def delete_all_audience_users():
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('DELETE FROM audience_users')
+        deleted = cursor.rowcount or 0
+        conn.commit()
+        cursor.close()
+    return deleted
+
+
 def get_audience_summary():
     summary = {
         'total': 0,
