@@ -22,6 +22,7 @@ def main():
     parser.add_argument('--post-text', default='')
     parser.add_argument('--post-image', default='')
     parser.add_argument('--post-delay', type=int, default=0)
+    parser.add_argument('--post-limit-per-account', type=int, default=5)
     parser.add_argument('--session-index', type=int, default=0)
     parser.add_argument('--use-all-sessions', action='store_true')
     parser.add_argument('--progress-file', default='')
@@ -41,6 +42,7 @@ def main():
                 post_text=args.post_text or '',
                 post_image=args.post_image or '',
                 post_delay=args.post_delay or 0,
+                post_limit_per_account=args.post_limit_per_account,
                 task_id=args.task_id or None,
             )
         )

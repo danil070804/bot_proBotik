@@ -3,15 +3,35 @@ from loguru import logger
 from random import randint
 from time import sleep
 import asyncio
+import os
 
 from config import API_ID, API_HASH, slp, join_sleep, from_join_sleep, to_join_sleep
 from functions import get_usable_sessions, get_proxy, generate_chats_list, build_telegram_client
-from db import insert_chat_db, get_all_chats, is_full
+from db import insert_chat_db, get_all_chats, is_full, set_account_health, delete_session_file
 from services.join_service import JoinService
 
 
 logger.add('logging.log', rotation='1 MB', encoding='utf-8')
 JOIN_SERVICE = JoinService()
+FATAL_ACCOUNT_STATUSES = {'account_banned', 'session_invalid', 'invalid', 'dead'}
+
+
+def _purge_dead_session(session, status):
+	if status not in FATAL_ACCOUNT_STATUSES:
+		return
+	try:
+		if os.path.exists(session):
+			os.remove(session)
+	except Exception:
+		pass
+	try:
+		delete_session_file(session)
+	except Exception:
+		pass
+	try:
+		set_account_health(session, 'dead', f'auto_delete:{status}', reason_code=status, reason_text=f'{status}')
+	except Exception:
+		pass
 
 
 async def join_to_chat(chat, client, session):
@@ -32,6 +52,7 @@ async def join_to_chat(chat, client, session):
             return
         elif status in {'account_banned', 'session_invalid', 'account_limited', 'unknown_error'}:
             logger.error(f'{session} ошибка аккаунта для {parsed_target.display_value}: {status} | {result.get("error_text")}')
+            _purge_dead_session(session, status)
             return
         if join_sleep != 0:
             await asyncio.sleep(join_sleep)

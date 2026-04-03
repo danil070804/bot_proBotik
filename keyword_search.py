@@ -1,6 +1,7 @@
 import argparse
 import asyncio
 import json
+import os
 from typing import Iterable, List, Optional, Set, Tuple
 
 from loguru import logger
@@ -9,7 +10,7 @@ from telethon.errors import FloodWaitError
 
 from config import API_ID, API_HASH
 from functions import build_telegram_client, get_proxy, get_usable_sessions
-from db import is_source_allowed
+from db import is_source_allowed, set_account_health, delete_session_file
 from repositories.audience import AudienceRepository
 from repositories.parse_tasks import ParseTaskRepository
 from services.join_service import JoinService
@@ -19,6 +20,7 @@ logger.add('logging.log', rotation='1 MB', encoding='utf-8')
 AUDIENCE_REPO = AudienceRepository()
 PARSE_TASK_REPO = ParseTaskRepository()
 JOIN_SERVICE = JoinService()
+FATAL_ACCOUNT_STATUSES = {'account_banned', 'session_invalid', 'invalid', 'dead'}
 
 
 def _write_progress(progress_file: str, data: dict):
@@ -63,6 +65,24 @@ def _chat_target(chat) -> Optional[Tuple[str, str]]:
     return target, title
 
 
+def _purge_dead_session(session, status):
+    if status not in FATAL_ACCOUNT_STATUSES:
+        return
+    try:
+        if os.path.exists(session):
+            os.remove(session)
+    except Exception:
+        pass
+    try:
+        delete_session_file(session)
+    except Exception:
+        pass
+    try:
+        set_account_health(session, 'dead', f'auto_delete:{status}', reason_code=status, reason_text=f'{status}')
+    except Exception:
+        pass
+
+
 async def _search_keyword(client, keyword: str, limit: int) -> List[dict]:
     try:
         result = await client(functions.contacts.SearchRequest(q=keyword, limit=limit))
@@ -100,11 +120,14 @@ async def _join_and_post(client, target: str, post_text: str, post_image: str, d
     last_error = ''
     try:
         join_result = await JOIN_SERVICE.join_target(client, target)
-        joined = join_result.get('status') in {'joined', 'already_in', 'join_request_sent'}
-        if not joined and join_result.get('status') not in {'already_in', 'join_request_sent'}:
-            last_error = join_result.get('error_text') or join_result.get('status') or ''
-        if join_result.get('status') == 'flood_wait':
+        status = join_result.get('status')
+        joined = status in {'joined', 'already_in', 'join_request_sent'}
+        if not joined and status not in {'already_in', 'join_request_sent'}:
+            last_error = join_result.get('error_text') or status or ''
+        if status == 'flood_wait':
             await asyncio.sleep(int(getattr(join_result.get('error_text'), 'seconds', 0) or 0))
+        if status in FATAL_ACCOUNT_STATUSES:
+            raise RuntimeError(f'fatal_account:{status}')
     except FloodWaitError as e:
         last_error = f'flood_wait:{int(e.seconds)}'
         await asyncio.sleep(int(e.seconds))
@@ -138,6 +161,7 @@ async def run_keyword_search(
     post_text: str = '',
     post_image: str = '',
     post_delay: int = 0,
+    post_limit_per_account: int = 5,
     task_id: int = None,
 ):
     if not API_ID or not API_HASH:
@@ -168,6 +192,8 @@ async def run_keyword_search(
         'filtered_total': 0,
         'joined_total': 0,
         'posted_total': 0,
+        'post_limit_per_account': post_limit_per_account,
+        'skipped_posts': 0,
         'errors': 0,
         'current_keyword': '',
         'active_session': '',
@@ -178,6 +204,8 @@ async def run_keyword_search(
     _write_progress(progress_file, progress)
     if task_id:
         PARSE_TASK_REPO.update_status(task_id, 'running')
+
+    session_post_counter = {s: 0 for s in selected_sessions}
 
     for idx, keyword in enumerate(keywords):
         session = selected_sessions[idx % len(selected_sessions)]
@@ -216,9 +244,19 @@ async def run_keyword_search(
                 posted = False
                 error_text = ''
                 try:
-                    joined, posted, error_text = await _join_and_post(client, target, post_text, post_image, post_delay)
+                    can_post = session_post_counter.get(session, 0) < post_limit_per_account if post_limit_per_account > 0 else True
+                    if not can_post:
+                        joined, posted, error_text = await _join_and_post(client, target, '', '', post_delay)
+                        progress['skipped_posts'] += 1
+                    else:
+                        joined, posted, error_text = await _join_and_post(client, target, post_text, post_image, post_delay)
+                        if posted:
+                            session_post_counter[session] = session_post_counter.get(session, 0) + 1
                 except Exception as exc:
                     error_text = str(exc)
+                    if str(exc).startswith('fatal_account:'):
+                        _purge_dead_session(session, str(exc).split(':', 1)[1])
+                        break
                 if joined:
                     progress['joined_total'] += 1
                 if posted:
@@ -273,6 +311,7 @@ async def run_keyword_search(
                     'post_text': post_text,
                     'post_image': post_image,
                     'post_delay': post_delay,
+                    'post_limit_per_account': post_limit_per_account,
                     'keywords': keywords,
                 },
             )
@@ -283,12 +322,13 @@ async def run_keyword_search(
     if task_id:
         PARSE_TASK_REPO.finish(task_id, status='failed' if progress['errors'] else 'finished')
     logger.info(
-        'keyword_search.finish total_keywords={} found={} saved={} joined={} posted={} errors={}',
+        'keyword_search.finish total_keywords={} found={} saved={} joined={} posted={} skipped_posts={} errors={}',
         len(keywords),
         progress.get('found_total', 0),
         progress.get('saved_total', 0),
         progress.get('joined_total', 0),
         progress.get('posted_total', 0),
+        progress.get('skipped_posts', 0),
         progress.get('errors', 0),
     )
 

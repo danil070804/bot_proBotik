@@ -125,11 +125,12 @@ DEFAULT_APP_SETTINGS = {
 	'campaign_max_attempts': '1',
 	'campaign_stop_on_error_rate': '0.30',
 	'accounts_allow_limited': '0',
-	'accounts_auto_delete_inactive': '0',
+	'accounts_auto_delete_inactive': '1',
 	'interface_mode': 'pro',
 	'active_preset': 'standard',
 	'keyword_search_limit': '20',
 	'keyword_post_delay': '60',
+	'keyword_post_limit_per_account': '5',
 }
 PRESET_CONFIGS = {
 	'super_safe': {
@@ -547,7 +548,7 @@ def list_sessions():
 
 
 def _is_inactive_account_status(status):
-	return str(status or '').strip().lower() in {'dead', 'invalid'}
+	return str(status or '').strip().lower() in {'dead', 'invalid', 'account_banned', 'session_invalid'}
 
 
 def _auto_delete_inactive_enabled():
@@ -576,7 +577,8 @@ def _delete_account_artifacts(session):
 
 
 def _apply_inactive_account_policy(session, status):
-	if not _auto_delete_inactive_enabled() or not _is_inactive_account_status(status):
+	fatal = _is_inactive_account_status(status)
+	if not fatal and (not _auto_delete_inactive_enabled() or status not in {'limited', 'flooded'}):
 		return False, False, ''
 	deleted, error = _delete_account_artifacts(session)
 	return True, deleted, error
@@ -1595,7 +1597,7 @@ def _format_progress_text(item, progress):
 			f'Аккаунт: {progress.get("active_session", "-")}\n'
 			f'Ключей: {progress.get("keywords_done", 0)}/{progress.get("keywords_total", 0)}\n'
 			f'Найдено: {progress.get("found_total", 0)} | Сохранено: {progress.get("saved_total", 0)}\n'
-			f'Вступили: {progress.get("joined_total", 0)} | Отправлено: {progress.get("posted_total", 0)}\n'
+			f'Вступили: {progress.get("joined_total", 0)} | Отправлено: {progress.get("posted_total", 0)} | Пропущено: {progress.get("skipped_posts", 0)}\n'
 			f'Ошибок: {progress.get("errors", 0)}'
 		)
 		last_error = str(progress.get('last_error', '') or '').strip()
@@ -3425,12 +3427,14 @@ def _queue_keyword_search_job(message, state):
 	post_text = state.get('post_text') or ''
 	post_image = state.get('post_image') or ''
 	post_delay = int(state.get('post_delay') or 0)
+	post_limit_per_account = int(state.get('post_limit_per_account') or _setting_int('keyword_post_limit_per_account'))
 	task_meta = {
 		'keywords': str(state.get('keywords') or '').strip(),
 		'search_limit': search_limit,
 		'post_text': post_text,
 		'post_image': post_image,
 		'post_delay': post_delay,
+		'post_limit_per_account': post_limit_per_account,
 		'use_all_sessions': _setting_bool('parser_use_all_sessions'),
 	}
 	task = PARSE_TASK_REPO.create(
@@ -3447,6 +3451,7 @@ def _queue_keyword_search_job(message, state):
 		'--task-id', str(task.get('id')),
 		'--search-limit', str(search_limit),
 		'--post-delay', str(post_delay),
+		'--post-limit-per-account', str(post_limit_per_account),
 	]
 	if post_text:
 		command += ['--post-text', post_text]
@@ -3466,6 +3471,8 @@ def _queue_keyword_search_job(message, state):
 	]
 	if post_text or post_image:
 		summary_lines.append(f'Задержка перед отправкой: <b>{post_delay} сек</b>')
+		limit_text = post_limit_per_account if post_limit_per_account > 0 else 'без ограничений'
+		summary_lines.append(f'Сообщений с аккаунта: <b>{limit_text}</b>')
 	_render_inline(
 		message.chat.id,
 		state.get('panel_msg_id'),
@@ -3520,6 +3527,7 @@ def _queue_parser_task_from_record(chat_id, task, panel_msg_id=None):
 			'--task-id', str(repeat_task.get('id')),
 			'--search-limit', str(int(meta.get('search_limit') or _setting_int('keyword_search_limit'))),
 			'--post-delay', str(int(meta.get('post_delay') or 0)),
+			'--post-limit-per-account', str(int(meta.get('post_limit_per_account') or _setting_int('keyword_post_limit_per_account'))),
 		]
 		if meta.get('post_text'):
 			command += ['--post-text', str(meta.get('post_text'))]
@@ -3612,7 +3620,7 @@ def parser_step_sources(message):
 		_prompt_step(
 			message.chat.id,
 			state,
-			f'🔍 <b>Поиск чатов • Шаг 2/4</b>\n'
+			f'🔍 <b>Поиск чатов • Шаг 2/6</b>\n'
 			f'Ключевые слова:\n<code>{message.text.strip()}</code>\n\n'
 			f'Укажи лимит результатов на каждое слово.\n'
 			f'Рекомендация: <b>{_setting_int("keyword_search_limit")}</b>.\n'
@@ -3762,7 +3770,7 @@ def parser_keyword_step_limit(message):
 	_prompt_step(
 		message.chat.id,
 		state,
-		'📝 <b>Поиск чатов • Шаг 3/4</b>\n'
+		'📝 <b>Поиск чатов • Шаг 3/6</b>\n'
 		'Введи текст, который нужно отправить в найденные чаты после вступления.\n'
 		'Если не нужно отправлять текст — напиши <code>нет</code> или оставь пусто.\n\n'
 		'Можно добавить плейсхейдеры Telegram (без форматирования).',
@@ -3790,7 +3798,7 @@ def parser_keyword_step_message(message):
 	_prompt_step(
 		message.chat.id,
 		state,
-		'🖼 <b>Поиск чатов • Шаг 4/4</b>\n'
+		'🖼 <b>Поиск чатов • Шаг 4/6</b>\n'
 		'Пришли ссылку на картинку/файл или путь к локальному файлу. Если картинка не нужна — напиши <code>нет</code>.\n'
 		'После этого укажу задержку перед отправкой.',
 		parser_keyword_step_image
@@ -3821,7 +3829,7 @@ def parser_keyword_step_image(message):
 	_prompt_step(
 		message.chat.id,
 		state,
-		f'⏱ <b>Поиск чатов</b>\n'
+		f'⏱ <b>Поиск чатов • Шаг 5/6</b>\n'
 		f'Укажи задержку (в секундах) перед отправкой сообщения после вступления.\n'
 		f'Рекомендация: <b>{_setting_int("keyword_post_delay")}</b>.',
 		parser_keyword_step_delay
@@ -3843,6 +3851,34 @@ def parser_keyword_step_delay(message):
 		state['post_delay'] = int(str(message.text).strip())
 	except (TypeError, ValueError):
 		state['post_delay'] = _setting_int('keyword_post_delay')
+	state['stage'] = 'post_limit'
+	USER_STATE[message.chat.id] = state
+	_prompt_step(
+		message.chat.id,
+		state,
+		f'📨 <b>Поиск чатов • Шаг 6/6</b>\n'
+		f'Сколько сообщений максимум отправлять одним аккаунтом за запуск?\n'
+		f'Рекомендация: <b>{_setting_int("keyword_post_limit_per_account")}</b>.\n'
+		f'Если нужно только вступить — оставь 0.',
+		parser_keyword_step_post_limit
+	)
+
+
+def parser_keyword_step_post_limit(message):
+	if not _is_admin(message.chat.id):
+		_deny_access(message.chat.id)
+		return
+	state = USER_STATE.get(message.chat.id, {})
+	if state.get('flow') != 'parser' or state.get('parse_mode') != 'keyword_search':
+		return
+	if _is_cancel(message.text):
+		USER_STATE.pop(message.chat.id, None)
+		bot.send_message(message.chat.id, '❌ Действие отменено.', reply_markup=build_new_menu())
+		return
+	try:
+		state['post_limit_per_account'] = int(str(message.text).strip())
+	except (TypeError, ValueError):
+		state['post_limit_per_account'] = _setting_int('keyword_post_limit_per_account')
 	_queue_keyword_search_job(message, state)
 
 

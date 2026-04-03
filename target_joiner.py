@@ -1,11 +1,12 @@
 import argparse
 import asyncio
 import json
+import os
 
 from loguru import logger
 
 from config import API_ID, API_HASH
-from db import set_account_health
+from db import set_account_health, delete_session_file
 from functions import get_proxy, get_usable_sessions, build_telegram_client
 from services.join_service import JoinService
 
@@ -14,6 +15,7 @@ logger.add('logging.log', rotation='1 MB', encoding='utf-8')
 JOIN_SERVICE = JoinService()
 TARGET_FATAL_STATUSES = {'invalid_invite', 'expired_invite', 'private_target_unresolved'}
 ACCOUNT_ERROR_STATUSES = {'flood_wait', 'account_limited', 'account_banned', 'session_invalid', 'unknown_error'}
+FATAL_ACCOUNT_STATUSES = {'account_banned', 'session_invalid', 'invalid', 'dead'}
 
 
 def _write_progress(progress_file, data):
@@ -76,6 +78,24 @@ def _apply_result(progress, result):
     if result.get('error_code'):
         progress['last_error_code'] = result.get('error_code') or ''
         progress['last_error_text'] = result.get('error_text') or ''
+
+
+def _purge_dead_session(session, status):
+	if status not in FATAL_ACCOUNT_STATUSES:
+		return
+	try:
+		if os.path.exists(session):
+			os.remove(session)
+	except Exception:
+		pass
+	try:
+		delete_session_file(session)
+	except Exception:
+		pass
+	try:
+		set_account_health(session, 'dead', f'auto_delete:{status}', reason_code=status, reason_text=f'{status}')
+	except Exception:
+		pass
 
 
 def _health_update_from_result(result, parsed_target):
@@ -161,6 +181,8 @@ async def run_target_joiner(target, progress_file):
         account_status, reason_code, account_details = _health_update_from_result(result, parsed_target)
         if account_status:
             set_account_health(session, account_status, account_details, reason_code=reason_code, reason_text=account_details)
+        if result.get('status') in FATAL_ACCOUNT_STATUSES:
+            _purge_dead_session(session, result.get('status'))
         logger.info(
             'target_joiner.account session={} target_type={} normalized_target={} join_method={} status={} error_code={} error_text={}',
             session,
